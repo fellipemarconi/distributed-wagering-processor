@@ -27,8 +27,8 @@ services:
     volumes:
       - ./docker/localstack/init-queues.sh:/etc/localstack/init/ready.d/init-queues.sh:ro
     healthcheck:
-      # a fila principal é a última a ser criada pelo script de init
-      test: ["CMD-SHELL", "awslocal sqs get-queue-url --queue-name wager-transactions.fifo"]
+      # a fila de eventos é a última a ser criada pelo script de init
+      test: ["CMD-SHELL", "awslocal sqs get-queue-url --queue-name wagering-events.fifo"]
       interval: 2s
       timeout: 5s
       retries: 30

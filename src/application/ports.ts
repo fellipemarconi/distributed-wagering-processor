@@ -58,6 +58,27 @@ export abstract class OutboxRepository {
   abstract add(message: OutboxMessage): Promise<void>;
   abstract save(message: OutboxMessage): Promise<void>;
   abstract findById(id: string): Promise<OutboxMessage | undefined>;
+  /**
+   * Pendentes e vencidas, travadas com FOR UPDATE SKIP LOCKED até o fim da transação: outro
+   * publisher recebe outras linhas em vez de esperar. Exige transação aberta.
+   */
+  abstract claimDue(now: Date, limit: number): Promise<OutboxMessage[]>;
+}
+
+/**
+ * O destino dos eventos está fora do ar (conexão, timeout, 5xx, throttling) — o problema não é
+ * a mensagem. Qualquer outro erro de `publish` é uma recusa àquela mensagem específica.
+ */
+export class EventPublisherUnavailableError extends Error {
+  constructor(options?: ErrorOptions) {
+    super('Destino de eventos indisponível', options);
+    this.name = 'EventPublisherUnavailableError';
+  }
+}
+
+export abstract class EventPublisher {
+  /** Resolve quando o destino aceitou a mensagem; rejeita caso contrário. */
+  abstract publish(message: OutboxMessage): Promise<void>;
 }
 
 export abstract class TransactionRunner {

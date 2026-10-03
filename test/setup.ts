@@ -9,7 +9,11 @@ import { ormOptions } from '../src/mikro-orm.config';
 process.env.DATABASE_URL =
   process.env.TEST_DATABASE_URL ?? 'postgres://wagering:wagering@localhost:5432/wagering_test';
 
-const HINT = 'Suba as dependências com `docker compose up -d --wait` (ou use `bun run test:integration`).';
+// Publisher desligado por padrão: só os testes da outbox o ligam (por override de Config),
+// para as demais suítes não publicarem na fila de eventos.
+process.env.OUTBOX_PUBLISHER_ENABLED ??= 'false';
+
+const HINT ='Suba as dependências com `docker compose up -d --wait` (ou use `bun run test:integration`).';
 
 // SKIP_INFRA=1 (script test:unit): testes de domínio puro não precisam de Postgres/SQS.
 if (process.env.SKIP_INFRA !== '1') {
@@ -21,10 +25,12 @@ if (process.env.SKIP_INFRA !== '1') {
     } catch {
       throw new Error(`PostgreSQL de teste inacessível. ${HINT}`);
     }
-    try {
-      await createSqsClient(config).send(new GetQueueUrlCommand({ QueueName: config.sqsQueueName }));
-    } catch {
-      throw new Error(`SQS inacessível ou fila ${config.sqsQueueName} inexistente. ${HINT}`);
+    for (const QueueName of [config.sqsQueueName, config.outboxQueueName]) {
+      try {
+        await createSqsClient(config).send(new GetQueueUrlCommand({ QueueName }));
+      } catch {
+        throw new Error(`SQS inacessível ou fila ${QueueName} inexistente. ${HINT}`);
+      }
     }
     await orm.getMigrator().up();
   } finally {

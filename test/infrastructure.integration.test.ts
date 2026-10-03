@@ -21,6 +21,10 @@ test('as duas filas existem e são FIFO', async () => {
   expect(dlq.FifoQueue).toBe('true');
 });
 
+test('a fila de eventos existe e é FIFO', async () => {
+  expect((await attributes('wagering-events.fifo')).FifoQueue).toBe('true');
+});
+
 test('a fila principal redireciona para a DLQ', async () => {
   const main = await attributes('wager-transactions.fifo');
   const dlq = await attributes('wager-transactions-dlq.fifo');

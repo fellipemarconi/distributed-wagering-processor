@@ -11,6 +11,13 @@ export interface Config {
   awsAccessKeyId: string;
   awsSecretAccessKey: string;
   sqsQueueName: string;
+  /** Liga o worker que publica a outbox nesta instância. Desligado, a instância só grava eventos. */
+  outboxPublisherEnabled: boolean;
+  outboxPollIntervalMs: number;
+  outboxBatchSize: number;
+  /** Limite de cada envio ao SQS, incluindo o retry interno do SDK. */
+  outboxPublishTimeoutMs: number;
+  outboxQueueName: string;
   logLevel: LogLevelName;
 }
 
@@ -29,15 +36,20 @@ export function loadConfig(env: Env = process.env): Config {
     throw new Error(`Configuração inválida: LOG_LEVEL="${logLevel}" (use ${LOG_LEVELS.join(' | ')})`);
   }
 
-  const dbLockTimeoutMs = Number(env.DB_LOCK_TIMEOUT_MS ?? 5000);
-  if (!Number.isInteger(dbLockTimeoutMs) || dbLockTimeoutMs < 1) {
-    throw new Error(`Configuração inválida: DB_LOCK_TIMEOUT_MS="${env.DB_LOCK_TIMEOUT_MS}" não é um inteiro positivo`);
+  const outboxPublisherEnabled = env.OUTBOX_PUBLISHER_ENABLED || 'true';
+  if (outboxPublisherEnabled !== 'true' && outboxPublisherEnabled !== 'false') {
+    throw new Error(`Configuração inválida: OUTBOX_PUBLISHER_ENABLED="${outboxPublisherEnabled}" (use true | false)`);
   }
 
   return {
     port,
     databaseUrl: url(env, 'DATABASE_URL', 'postgres://wagering:wagering@localhost:5432/wagering'),
-    dbLockTimeoutMs,
+    dbLockTimeoutMs: positiveInt(env, 'DB_LOCK_TIMEOUT_MS', 5000),
+    outboxPublisherEnabled: outboxPublisherEnabled === 'true',
+    outboxPollIntervalMs: positiveInt(env, 'OUTBOX_POLL_INTERVAL_MS', 1000),
+    outboxBatchSize: positiveInt(env, 'OUTBOX_BATCH_SIZE', 10),
+    outboxPublishTimeoutMs: positiveInt(env, 'OUTBOX_PUBLISH_TIMEOUT_MS', 2000),
+    outboxQueueName: env.OUTBOX_QUEUE_NAME || 'wagering-events.fifo',
     awsEndpointUrl: url(env, 'AWS_ENDPOINT_URL', 'http://localhost:4566'),
     awsRegion: env.AWS_REGION || 'us-east-1',
     awsAccessKeyId: env.AWS_ACCESS_KEY_ID || 'test',
@@ -45,6 +57,14 @@ export function loadConfig(env: Env = process.env): Config {
     sqsQueueName: env.SQS_QUEUE_NAME || 'wager-transactions.fifo',
     logLevel: logLevel as LogLevelName,
   };
+}
+
+function positiveInt(env: Env, name: string, fallback: number): number {
+  const value = Number(env[name] ?? fallback);
+  if (!Number.isInteger(value) || value < 1) {
+    throw new Error(`Configuração inválida: ${name}="${env[name]}" não é um inteiro positivo`);
+  }
+  return value;
 }
 
 function url(env: Env, name: string, fallback: string): string {

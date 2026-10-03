@@ -4,6 +4,7 @@ import { MikroOrmModule } from '@mikro-orm/nestjs';
 import { CreateWallet } from './application/create-wallet';
 import {
   Clock,
+  EventPublisher,
   IdGenerator,
   LedgerRepository,
   OutboxRepository,
@@ -12,12 +13,15 @@ import {
   WalletRepository,
 } from './application/ports';
 import { ProcessWagerTransaction } from './application/process-wager-transaction';
+import { PublishOutboxBatch } from './application/publish-outbox-batch';
 import { CONFIG, type Config } from './config';
 import { HealthController } from './health/health.controller';
 import { ApiExceptionFilter } from './http/api-error';
 import { WageringController } from './http/wagering.controller';
 import { WalletsController } from './http/wallets.controller';
 import { PersistenceModule } from './infra/persistence/persistence.module';
+import { OutboxPublisherWorker } from './infra/outbox-publisher.worker';
+import { SqsEventPublisher } from './infra/sqs-event-publisher';
 import { sqsProvider } from './infra/sqs.provider';
 import { ormOptions } from './mikro-orm.config';
 
@@ -42,6 +46,12 @@ const useCases: Provider[] = [
     inject: USE_CASE_DEPS,
     useFactory: (...deps: ConstructorParameters<typeof ProcessWagerTransaction>) => new ProcessWagerTransaction(...deps),
   },
+  {
+    provide: PublishOutboxBatch,
+    inject: [TransactionRunner, OutboxRepository, EventPublisher, Clock, CONFIG],
+    useFactory: (tx: TransactionRunner, outbox: OutboxRepository, publisher: EventPublisher, clock: Clock, config: Config) =>
+      new PublishOutboxBatch(tx, outbox, publisher, clock, config.outboxBatchSize),
+  },
 ];
 
 @Module({})
@@ -55,8 +65,12 @@ export class AppModule {
       providers: [
         { provide: CONFIG, useValue: config },
         sqsProvider,
+        // classe concreta também registrada: os testes embrulham o adapter real em vez de mocká-lo
+        SqsEventPublisher,
+        { provide: EventPublisher, useExisting: SqsEventPublisher },
         { provide: APP_FILTER, useClass: ApiExceptionFilter },
         ...useCases,
+        OutboxPublisherWorker,
       ],
     };
   }

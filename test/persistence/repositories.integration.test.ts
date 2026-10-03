@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { UniqueViolationError } from '../../src/application/ports';
 import { InsufficientFundsError } from '../../src/domain/errors';
 import { FailureCode } from '../../src/domain/failure-code';
@@ -20,7 +20,7 @@ import {
   MikroOrmWalletRepository,
 } from '../../src/infra/persistence/repositories';
 import { brl, txProps, usd } from '../domain/fixtures';
-import { initOrm, resetSchema, uuid } from './helpers';
+import { initOrm, resetSchema, sql, uuid } from './helpers';
 
 const orm = await initOrm();
 beforeAll(() => resetSchema(orm));
@@ -353,6 +353,69 @@ describe('leitura de wallet com lock exclusivo', () => {
   test('fora de transação a leitura para alteração falha', async () => {
     const wallet = await storedWallet();
     await expect(wallets.findByIdForUpdate(wallet.id)).rejects.toThrow(/transaction/i);
+  });
+});
+
+describe('claim da outbox', () => {
+  const T = Date.parse('2026-07-29T15:00:00.000Z');
+  const at = (seconds: number) => new Date(T + seconds * 1000);
+
+  // as outras suítes deste arquivo deixam pendências; cada teste parte de uma outbox sem nenhuma
+  beforeEach(() => sql(orm, 'update outbox_messages set published_at = now() where published_at is null'));
+
+  async function pending(occurredAt: Date, state: { nextAttemptAt?: Date; publishedAt?: Date } = {}): Promise<string> {
+    const id = uuid();
+    await outbox.add(
+      OutboxMessage.rehydrate({ id, aggregateId: uuid(), eventType: 'TestEvent', payload: {}, occurredAt, attempts: 0, ...state }),
+    );
+    return id;
+  }
+  const claim = (now: Date, limit: number) => runner.run(async () => (await outbox.claimDue(now, limit)).map((m) => m.id));
+
+  test('devolve só pendentes vencidas: novas primeiro, depois por próxima tentativa e ocorrência', async () => {
+    const retryLate = await pending(at(0), { nextAttemptAt: at(50) });
+    const retryEarly = await pending(at(1), { nextAttemptAt: at(40) });
+    const newer = await pending(at(3));
+    const older = await pending(at(2));
+    await pending(at(0), { nextAttemptAt: at(61) }); // ainda em backoff
+    await pending(at(0), { publishedAt: at(1) }); // já publicada
+
+    expect(await claim(at(60), 10)).toEqual([older, newer, retryEarly, retryLate]);
+  });
+
+  test('próxima tentativa igual ao instante atual já está vencida', async () => {
+    const id = await pending(at(0), { nextAttemptAt: at(60) });
+    expect(await claim(at(60), 10)).toEqual([id]);
+  });
+
+  test('respeita o limite', async () => {
+    const first = await pending(at(0));
+    await pending(at(1));
+    expect(await claim(at(60), 1)).toEqual([first]);
+  });
+
+  test('segunda transação recebe outras linhas sem esperar a primeira', async () => {
+    const ids = [await pending(at(0)), await pending(at(1)), await pending(at(2))];
+    const gate = Promise.withResolvers<void>();
+    const firstClaimed = Promise.withResolvers<string[]>();
+
+    const first = runner.run(async () => {
+      firstClaimed.resolve((await outbox.claimDue(at(60), 2)).map((m) => m.id));
+      await gate.promise; // segura os locks
+    });
+    expect(await firstClaimed.promise).toEqual(ids.slice(0, 2));
+
+    // conclui com os locks da primeira ainda presos: SKIP LOCKED, não espera
+    expect(await claim(at(60), 10)).toEqual(ids.slice(2));
+
+    gate.resolve();
+    await first;
+    // sem commit de alteração, as linhas da primeira voltam a estar disponíveis
+    expect(await claim(at(60), 10)).toEqual(ids);
+  });
+
+  test('fora de transação o claim falha', async () => {
+    await expect(outbox.claimDue(at(60), 10)).rejects.toThrow(/transaction/i);
   });
 });
 

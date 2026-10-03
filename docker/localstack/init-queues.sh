@@ -17,3 +17,9 @@ dlq_arn=$(awslocal sqs get-queue-attributes \
 awslocal sqs create-queue \
   --queue-name wager-transactions.fifo \
   --attributes "{\"FifoQueue\":\"true\",\"RedrivePolicy\":\"{\\\"deadLetterTargetArn\\\":\\\"$dlq_arn\\\",\\\"maxReceiveCount\\\":\\\"5\\\"}\"}"
+
+# Destino do publisher da outbox. Sem ContentBasedDeduplication: o publisher manda o eventId
+# como MessageDeduplicationId. Criada por último: é a fila que o healthcheck do Compose consulta.
+awslocal sqs create-queue \
+  --queue-name wagering-events.fifo \
+  --attributes FifoQueue=true

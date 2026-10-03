@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { LockMode, UniqueConstraintViolationException } from '@mikro-orm/core';
+import { LockMode, QueryOrder, UniqueConstraintViolationException } from '@mikro-orm/core';
 import { EntityManager } from '@mikro-orm/postgresql';
 import {
   InboxRepository,
@@ -221,5 +221,21 @@ export class MikroOrmOutboxRepository extends OutboxRepository {
   async findById(id: string): Promise<OutboxMessage | undefined> {
     const record = await this.em.findOne(OutboxMessageSchema, { id }, FRESH);
     return record ? outboxMessageMapper.toDomain(record) : undefined;
+  }
+
+  // O lock de linha é o "lease": se o processo morrer, o Postgres desfaz a transação e libera as
+  // linhas. Novas (next_attempt_at nulo) antes das em retry, para uma envenenada não segurar a fila.
+  async claimDue(now: Date, limit: number): Promise<OutboxMessage[]> {
+    const records = await this.em.find(
+      OutboxMessageSchema,
+      { publishedAt: null, $or: [{ nextAttemptAt: null }, { nextAttemptAt: { $lte: now } }] },
+      {
+        ...FRESH,
+        lockMode: LockMode.PESSIMISTIC_PARTIAL_WRITE,
+        orderBy: { nextAttemptAt: QueryOrder.ASC_NULLS_FIRST, occurredAt: QueryOrder.ASC, id: QueryOrder.ASC },
+        limit,
+      },
+    );
+    return records.map(outboxMessageMapper.toDomain);
   }
 }
