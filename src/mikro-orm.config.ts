@@ -2,13 +2,13 @@ import { Logger } from '@nestjs/common';
 import { defineConfig, type Options } from '@mikro-orm/postgresql';
 import { Migrator } from '@mikro-orm/migrations';
 import { loadConfig, type Config } from './config';
+import { schemas } from './infra/persistence/schemas';
 
 export function ormOptions(config: Config): Options {
   return defineConfig({
     clientUrl: config.databaseUrl,
     connect: false,
-    entities: [],
-    discovery: { warnWhenNoEntities: false },
+    entities: schemas,
     extensions: [Migrator],
     migrations: {
       path: 'src/migrations',
