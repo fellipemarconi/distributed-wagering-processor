@@ -1,3 +1,4 @@
+import { backoffDelayMs } from './backoff';
 import { DomainError, InvalidTransactionStateError } from './errors';
 import { FailureCode } from './failure-code';
 import { LedgerDirection } from './ledger-entry';
@@ -44,6 +45,9 @@ export interface WagerTransactionState extends CreateWagerTransactionProps {
   processedAt?: Date;
   resultBalance?: Money;
   completedAt?: Date;
+  /** Tentativas de resolver a referência que terminaram em "ainda ausente". Padrão 0. */
+  referenceAttempts?: number;
+  nextReferenceAttemptAt?: Date;
 }
 
 /** Reservado para transações internas (OPENING); recusado em entrada externa. */
@@ -72,6 +76,8 @@ export class WagerTransaction {
     private _processedAt?: Date,
     private _resultBalance?: Money,
     private _completedAt?: Date,
+    private _referenceAttempts = 0,
+    private _nextReferenceAttemptAt?: Date,
   ) {}
 
   /** Entrada externa (API/fila). Nasce em PENDING. OPENING não entra por aqui. */
@@ -147,6 +153,8 @@ export class WagerTransaction {
       s.processedAt,
       s.resultBalance,
       s.completedAt,
+      s.referenceAttempts ?? 0,
+      s.nextReferenceAttemptAt,
     );
   }
 
@@ -170,6 +178,13 @@ export class WagerTransaction {
   get completedAt(): Date | undefined {
     return this._completedAt;
   }
+  get referenceAttempts(): number {
+    return this._referenceAttempts;
+  }
+  /** Ausente = nunca tentada: vencida de imediato. */
+  get nextReferenceAttemptAt(): Date | undefined {
+    return this._nextReferenceAttemptAt;
+  }
 
   // ---- transições: PENDING e PENDING_REFERENCE vão para qualquer estado abaixo; terminais não saem.
 
@@ -191,6 +206,19 @@ export class WagerTransaction {
       throw new DomainError(`${this.kind} sem referência não pode aguardar referência`);
     }
     this._status = WagerTransactionStatus.PendingReference;
+  }
+
+  /**
+   * Referência ainda ausente: conta a tentativa e agenda a próxima com o backoff da outbox, sem
+   * passar de `notAfter` (fim do prazo de espera) — a rejeição por prazo sai no prazo.
+   */
+  scheduleReferenceRetry(now: Date, notAfter: Date): void {
+    if (this._status !== WagerTransactionStatus.PendingReference) {
+      throw new DomainError(`Transação ${this.id} não está aguardando referência`);
+    }
+    this._referenceAttempts += 1;
+    const next = now.getTime() + backoffDelayMs(this._referenceAttempts);
+    this._nextReferenceAttemptAt = new Date(Math.min(next, notAfter.getTime()));
   }
 
   /** `observedBalance`: saldo da wallet no momento da rejeição (rejeição não o altera). */

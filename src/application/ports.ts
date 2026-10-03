@@ -34,6 +34,17 @@ export abstract class WagerTransactionRepository {
   abstract findByIdempotencyKey(providerId: string, idempotencyKey: string): Promise<WagerTransaction | undefined>;
   /** Já existe REFUND ou ROLLBACK em PROCESSED cuja referência resolvida é esta transação. */
   abstract hasProcessedReversalOf(referenceTransactionId: string): Promise<boolean>;
+  /** PENDING_REFERENCE vencidas (nunca tentadas primeiro). Não trava nada. */
+  abstract findDuePendingReferences(now: Date, limit: number): Promise<{ id: string; walletId: string }[]>;
+  /**
+   * Relê com FOR UPDATE SKIP LOCKED, só se ainda PENDING_REFERENCE e vencida; senão (ou se a linha
+   * estiver travada) devolve undefined sem esperar. Exige transação aberta.
+   */
+  abstract claimPendingReference(id: string, now: Date): Promise<WagerTransaction | undefined>;
+  /** UPDATE condicionado a status = PENDING_REFERENCE; lança se não afetar exatamente uma linha. */
+  abstract savePendingReference(tx: WagerTransaction): Promise<void>;
+  /** Torna vencidas em `now` as PENDING_REFERENCE do provider que aguardam este id externo. */
+  abstract wakePendingReferencesOf(providerId: string, externalTransactionId: string, now: Date): Promise<void>;
 }
 
 export interface LedgerPage {

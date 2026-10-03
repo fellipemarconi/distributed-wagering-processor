@@ -27,6 +27,12 @@ export interface Config {
   sqsConsumerVisibilityTimeoutSeconds: number;
   /** Teto do adiamento de uma mensagem que falhou de forma transitória. */
   sqsConsumerMaxBackoffSeconds: number;
+  /** Liga o worker que reavalia PENDING_REFERENCE nesta instância (ligue em pelo menos uma). */
+  pendingReferenceWorkerEnabled: boolean;
+  pendingReferencePollIntervalMs: number;
+  pendingReferenceBatchSize: number;
+  /** Prazo, a partir do createdAt, para a referência aparecer; depois disso REFERENCE_NOT_FOUND. */
+  pendingReferenceTtlSeconds: number;
   logLevel: LogLevelName;
 }
 
@@ -72,6 +78,10 @@ export function loadConfig(env: Env = process.env): Config {
     sqsConsumerWaitTimeSeconds: positiveInt(env, 'SQS_CONSUMER_WAIT_TIME_SECONDS', 20, 20),
     sqsConsumerVisibilityTimeoutSeconds,
     sqsConsumerMaxBackoffSeconds: positiveInt(env, 'SQS_CONSUMER_MAX_BACKOFF_SECONDS', 300),
+    pendingReferenceWorkerEnabled: bool(env, 'PENDING_REFERENCE_WORKER_ENABLED'),
+    pendingReferencePollIntervalMs: positiveInt(env, 'PENDING_REFERENCE_POLL_INTERVAL_MS', 1000),
+    pendingReferenceBatchSize: positiveInt(env, 'PENDING_REFERENCE_BATCH_SIZE', 20),
+    pendingReferenceTtlSeconds: positiveInt(env, 'PENDING_REFERENCE_TTL_SECONDS', 900),
     outboxPublisherEnabled: bool(env, 'OUTBOX_PUBLISHER_ENABLED'),
     outboxPollIntervalMs: positiveInt(env, 'OUTBOX_POLL_INTERVAL_MS', 1000),
     outboxBatchSize: positiveInt(env, 'OUTBOX_BATCH_SIZE', 10),

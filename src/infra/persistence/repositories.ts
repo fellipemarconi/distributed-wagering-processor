@@ -57,6 +57,11 @@ async function updateOne(op: Promise<number>, what: string): Promise<void> {
   if (affected !== 1) throw new Error(`${what}: esperava atualizar 1 linha, atualizou ${affected}`);
 }
 
+const duePendingReference = (now: Date) => ({
+  status: WagerTransactionStatus.PendingReference,
+  $or: [{ nextReferenceAttemptAt: null }, { nextReferenceAttemptAt: { $lte: now } }],
+});
+
 @Injectable()
 export class MikroOrmTransactionRunner extends TransactionRunner {
   constructor(private readonly em: EntityManager) {
@@ -142,6 +147,55 @@ export class MikroOrmWagerTransactionRepository extends WagerTransactionReposito
       { ...FRESH, fields: ['id'] },
     );
     return record !== null;
+  }
+
+  // filtro e ordem de ix_wager_tx_pending_reference_due
+  async findDuePendingReferences(now: Date, limit: number): Promise<{ id: string; walletId: string }[]> {
+    const records = await this.em.find(WagerTransactionSchema, duePendingReference(now), {
+      ...FRESH,
+      fields: ['id', 'walletId'],
+      orderBy: { nextReferenceAttemptAt: QueryOrder.ASC_NULLS_FIRST },
+      limit,
+    });
+    return records.map(({ id, walletId }) => ({ id, walletId }));
+  }
+
+  // O filtro é reavaliado depois do lock da wallet: quem perdeu a corrida encontra a transação
+  // terminal ou reagendada e recebe undefined. SKIP LOCKED: nunca espera pela linha.
+  async claimPendingReference(id: string, now: Date): Promise<WagerTransaction | undefined> {
+    const record = await this.em.findOne(
+      WagerTransactionSchema,
+      { id, ...duePendingReference(now) },
+      { ...FRESH, lockMode: LockMode.PESSIMISTIC_PARTIAL_WRITE },
+    );
+    return record ? wagerTransactionMapper.toDomain(record) : undefined;
+  }
+
+  savePendingReference(tx: WagerTransaction): Promise<void> {
+    return write(
+      updateOne(
+        this.em.nativeUpdate(
+          WagerTransactionSchema,
+          { id: tx.id, status: WagerTransactionStatus.PendingReference },
+          wagerTransactionMapper.toMutableRecord(tx),
+        ),
+        `transação pendente ${tx.id}`,
+      ),
+    );
+  }
+
+  // ponytail: o predicado de status usa o índice parcial das pendentes (conjunto pequeno em regime);
+  // criar índice parcial por (provider_id, reference_external_transaction_id) se ele crescer.
+  async wakePendingReferencesOf(providerId: string, externalTransactionId: string, now: Date): Promise<void> {
+    await this.em.nativeUpdate(
+      WagerTransactionSchema,
+      {
+        status: WagerTransactionStatus.PendingReference,
+        providerId,
+        referenceExternalTransactionId: externalTransactionId,
+      },
+      { nextReferenceAttemptAt: now },
+    );
   }
 
   private async findOne(where: Record<string, string>): Promise<WagerTransaction | undefined> {

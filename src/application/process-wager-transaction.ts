@@ -1,22 +1,11 @@
-import { DomainError, InsufficientFundsError } from '../domain/errors';
-import { FailureCode } from '../domain/failure-code';
-import {
-  WagerTransactionPendingReference,
-  WagerTransactionProcessed,
-  WagerTransactionRejected,
-  WalletBalanceChanged,
-  type IntegrationEvent,
-} from '../domain/integration-events';
-import { LedgerDirection, type WalletLedgerEntry } from '../domain/ledger-entry';
+import { DomainError } from '../domain/errors';
 import { OutboxMessage } from '../domain/outbox-message';
 import { computePayloadHash } from '../domain/payload-hash';
-import { validateReference } from '../domain/reference-validation';
 import {
   WagerTransaction,
   WagerTransactionKind as Kind,
   WagerTransactionStatus as Status,
 } from '../domain/wager-transaction';
-import type { Wallet } from '../domain/wallet';
 import { InvalidPayloadError, parseMoney, parseObject, parseText, parseUuid, type RequestContext } from './input';
 import {
   Clock,
@@ -28,6 +17,7 @@ import {
   WagerTransactionRepository,
   WalletRepository,
 } from './ports';
+import { WagerDecision } from './wager-decision';
 
 export type IdempotencyConflictCode = 'IDEMPOTENCY_KEY_CONFLICT' | 'EXTERNAL_TRANSACTION_CONFLICT';
 
@@ -41,6 +31,8 @@ const EXTERNAL_KINDS: string[] = Object.values(Kind).filter((kind) => kind !== K
 const IDEMPOTENCY_CONSTRAINTS = ['uq_wager_tx_provider_idempotency_key', 'uq_wager_tx_provider_external'];
 
 export class ProcessWagerTransaction {
+  private readonly decision: WagerDecision;
+
   constructor(
     private readonly runner: TransactionRunner,
     private readonly wallets: WalletRepository,
@@ -49,7 +41,9 @@ export class ProcessWagerTransaction {
     private readonly outbox: OutboxRepository,
     private readonly ids: IdGenerator,
     private readonly clock: Clock,
-  ) {}
+  ) {
+    this.decision = new WagerDecision(transactions, ids);
+  }
 
   /**
    * `input`: campos de negócio + `idempotencyKey` (no HTTP vem do header; na fila, do corpo da mensagem).
@@ -68,7 +62,7 @@ export class ProcessWagerTransaction {
         const prior = await this.findPrior(tx); // 3.
         if (prior) return prior;
 
-        const entry = await this.decide(tx, wallet, at); // 4.
+        const entry = await this.decision.decide(tx, wallet, at); // 4.
 
         // 5. transação já no estado final: um INSERT, nenhum UPDATE. Ordem imposta pelas FKs.
         await this.transactions.add(tx);
@@ -76,8 +70,12 @@ export class ProcessWagerTransaction {
           await this.ledger.append(entry);
           await this.wallets.save(wallet);
         }
-        for (const event of this.events(tx, wallet, entry, ctx, at)) {
+        for (const event of this.decision.events(tx, wallet, entry, ctx, at)) {
           await this.outbox.add(OutboxMessage.enqueue(event));
+        }
+        // pendentes que aguardavam esta transação ficam vencidas já, sem esperar o backoff
+        if (tx.isTerminal()) {
+          await this.transactions.wakePendingReferencesOf(tx.providerId, tx.externalTransactionId, at);
         }
         const outcome =
           tx.status === Status.Rejected ? 'rejected' : tx.status === Status.PendingReference ? 'pending' : 'processed';
@@ -141,53 +139,5 @@ export class ProcessWagerTransaction {
       return { outcome: 'conflict', code: 'EXTERNAL_TRANSACTION_CONFLICT' };
     }
     return undefined;
-  }
-
-  /** Leva `tx` ao estado decidido e devolve o lançamento, quando o saldo muda. */
-  private async decide(tx: WagerTransaction, wallet: Wallet, at: Date): Promise<WalletLedgerEntry | undefined> {
-    const balance = wallet.balance;
-    if (tx.playerId !== wallet.playerId) return void tx.reject(FailureCode.WalletPlayerMismatch, balance, at);
-    if (tx.money.currency !== wallet.currency) return void tx.reject(FailureCode.CurrencyMismatch, balance, at);
-
-    let reference: WagerTransaction | undefined;
-    if (tx.referenceExternalTransactionId !== undefined) {
-      reference = await this.transactions.findByExternalId(tx.providerId, tx.referenceExternalTransactionId);
-      // Sem corrida: uma referência válida é da mesma wallet, que está travada. O índice único
-      // uq_wager_tx_processed_reversal fica como rede de segurança.
-      const alreadyReversed =
-        reference !== undefined && tx.requiresReference() && (await this.transactions.hasProcessedReversalOf(reference.id));
-      const check = validateReference(tx, reference, alreadyReversed);
-      if (check.outcome === 'wait') return void tx.markPendingReference();
-      if (check.outcome === 'reject') return void tx.reject(check.code, balance, at);
-    }
-
-    if (!tx.affectsBalance()) return void tx.markProcessed(reference?.id, balance, at);
-
-    try {
-      const movement = { entryId: this.ids.next(), transactionId: tx.id, at };
-      const entry =
-        tx.ledgerDirectionFor(reference) === LedgerDirection.Debit
-          ? wallet.debit(tx.money, movement)
-          : wallet.credit(tx.money, movement);
-      tx.markProcessed(reference?.id, wallet.balance, at);
-      return entry;
-    } catch (error) {
-      if (!(error instanceof InsufficientFundsError)) throw error;
-      return void tx.reject(tx.insufficientFundsCode(), balance, at);
-    }
-  }
-
-  private events(
-    tx: WagerTransaction,
-    wallet: Wallet,
-    entry: WalletLedgerEntry | undefined,
-    ctx: RequestContext,
-    at: Date,
-  ): IntegrationEvent<unknown>[] {
-    const eventCtx = () => ({ ...ctx, eventId: this.ids.next(), occurredAt: at });
-    if (tx.status === Status.Rejected) return [WagerTransactionRejected.from(tx, eventCtx())];
-    if (tx.status === Status.PendingReference) return [WagerTransactionPendingReference.from(tx, eventCtx())];
-    const processed = WagerTransactionProcessed.from(tx, eventCtx());
-    return entry ? [processed, WalletBalanceChanged.from(wallet, entry, eventCtx())] : [processed];
   }
 }

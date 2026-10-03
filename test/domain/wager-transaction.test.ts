@@ -236,3 +236,50 @@ test('taxonomia de FailureCode é exatamente a documentada', () => {
   ]);
   expect(JSON.stringify({ code: FailureCode.InsufficientFunds })).toBe('{"code":"INSUFFICIENT_FUNDS"}');
 });
+
+describe('tentativas de resolução da referência', () => {
+  const at = (seconds: number) => new Date(T0.getTime() + seconds * 1000);
+  const pendingRefund = () => {
+    const refund = tx({ kind: Kind.Refund });
+    refund.markPendingReference();
+    return refund;
+  };
+
+  test('transação nova: 0 tentativas e nenhuma próxima tentativa', () => {
+    const refund = tx({ kind: Kind.Refund });
+    expect(refund.referenceAttempts).toBe(0);
+    expect(refund.nextReferenceAttemptAt).toBeUndefined();
+  });
+
+  test('cada tentativa incrementa e agenda com o backoff: +1s, +2s', () => {
+    const refund = pendingRefund();
+    refund.scheduleReferenceRetry(at(0), at(900));
+    expect([refund.referenceAttempts, refund.nextReferenceAttemptAt]).toEqual([1, at(1)]);
+    refund.scheduleReferenceRetry(at(10), at(900));
+    expect([refund.referenceAttempts, refund.nextReferenceAttemptAt]).toEqual([2, at(12)]);
+    expect(refund.status).toBe(Status.PendingReference);
+  });
+
+  test('a próxima tentativa não passa do limite informado', () => {
+    const refund = stored({ kind: Kind.Refund, status: Status.PendingReference, processedAt: undefined, referenceAttempts: 9 });
+    refund.scheduleReferenceRetry(at(898), at(900)); // o backoff sozinho daria +300s
+    expect([refund.referenceAttempts, refund.nextReferenceAttemptAt]).toEqual([10, at(900)]);
+  });
+
+  test.each([
+    ['PENDING', () => tx({ kind: Kind.Refund })],
+    ['PROCESSED', () => stored({ kind: Kind.Refund })],
+    ['REJECTED', () => stored({ kind: Kind.Refund, status: Status.Rejected, processedAt: undefined })],
+  ])('fora de PENDING_REFERENCE (%s) falha sem alterar nada', (_name, make) => {
+    const t = make();
+    expect(() => t.scheduleReferenceRetry(at(0), at(900))).toThrow(DomainError);
+    expect(t.referenceAttempts).toBe(0);
+    expect(t.nextReferenceAttemptAt).toBeUndefined();
+  });
+
+  test('rehydrate preserva tentativas e próxima tentativa', () => {
+    const t = stored({ kind: Kind.Refund, status: Status.PendingReference, processedAt: undefined, referenceAttempts: 3, nextReferenceAttemptAt: T1 });
+    expect(t.referenceAttempts).toBe(3);
+    expect(t.nextReferenceAttemptAt).toBe(T1);
+  });
+});

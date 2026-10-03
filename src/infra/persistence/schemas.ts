@@ -51,11 +51,11 @@ export interface WagerTransactionRecord {
   completedAt: Date | null;
   resultBalanceAmount: string | null;
   resultBalanceCurrency: string | null;
+  referenceAttempts: number;
+  nextReferenceAttemptAt: Date | null;
   createdAt: Date;
 }
 
-// reference_attempts / next_reference_attempt_at existem no banco mas não são mapeadas:
-// entram com o worker de PENDING_REFERENCE.
 export const WagerTransactionSchema = new EntitySchema<WagerTransactionRecord>({
   name: 'WagerTransactionRecord',
   tableName: 'wager_transactions',
@@ -81,6 +81,8 @@ export const WagerTransactionSchema = new EntitySchema<WagerTransactionRecord>({
     resultBalanceAmount: { ...money, nullable: true },
     // separada de `currency`: o saldo observado é da wallet e pode divergir da moeda da transação
     resultBalanceCurrency: { type: 'text', nullable: true },
+    referenceAttempts: { type: 'integer' },
+    nextReferenceAttemptAt: { type: 'Date', nullable: true },
     createdAt: { type: 'Date' },
   },
 });

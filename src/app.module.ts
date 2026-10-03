@@ -16,6 +16,8 @@ import {
 import { ProcessWagerMessage } from './application/process-wager-message';
 import { ProcessWagerTransaction } from './application/process-wager-transaction';
 import { PublishOutboxBatch } from './application/publish-outbox-batch';
+import { ReprocessPendingReferences } from './application/reprocess-pending-references';
+import { PendingReferenceWorker } from './infra/pending-reference.worker';
 import { CONFIG, type Config } from './config';
 import { HealthController } from './health/health.controller';
 import { ApiExceptionFilter } from './http/api-error';
@@ -60,6 +62,18 @@ const useCases: Provider[] = [
     useFactory: (tx: TransactionRunner, outbox: OutboxRepository, publisher: EventPublisher, clock: Clock, config: Config) =>
       new PublishOutboxBatch(tx, outbox, publisher, clock, config.outboxBatchSize),
   },
+  {
+    provide: ReprocessPendingReferences,
+    inject: [...USE_CASE_DEPS, CONFIG],
+    useFactory: (...args: unknown[]) => {
+      const config = args.pop() as Config;
+      return new ReprocessPendingReferences(
+        ...(args as ConstructorParameters<typeof CreateWallet>),
+        config.pendingReferenceBatchSize,
+        config.pendingReferenceTtlSeconds * 1000,
+      );
+    },
+  },
 ];
 
 @Module({})
@@ -80,6 +94,7 @@ export class AppModule {
         ...useCases,
         OutboxPublisherWorker,
         SqsWagerConsumer,
+        PendingReferenceWorker,
       ],
     };
   }

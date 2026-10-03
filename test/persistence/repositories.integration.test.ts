@@ -537,3 +537,148 @@ describe('paginação estável do ledger', () => {
     expect(page3.nextCursor).toBeUndefined();
   });
 });
+
+describe('pendentes de referência', () => {
+  const T = Date.parse('2026-07-29T15:00:00.000Z');
+  const at = (seconds: number) => new Date(T + seconds * 1000);
+  const FAR = new Date('2100-01-01T00:00:00.000Z');
+
+  // as outras suítes deste arquivo deixam pendentes; cada teste parte de nenhuma vencida
+  beforeEach(() => sql(orm, `update wager_transactions set next_reference_attempt_at = ? where status = 'PENDING_REFERENCE'`, [FAR]));
+
+  async function pendingRefund(
+    wallet: Wallet,
+    state: { nextReferenceAttemptAt?: Date; referenceAttempts?: number } = {},
+    overrides: Parameters<typeof txProps>[0] = {},
+  ): Promise<WagerTransaction> {
+    const props = txProps({
+      id: uuid(),
+      walletId: wallet.id,
+      playerId: wallet.playerId,
+      externalTransactionId: uuid(),
+      kind: Kind.Refund,
+      referenceExternalTransactionId: 'ref-x',
+      createdAt: now(),
+      ...overrides,
+    });
+    const tx = WagerTransaction.rehydrate({ ...props, status: Status.PendingReference, ...state });
+    await transactions.add(tx);
+    return tx;
+  }
+  const claim = (id: string, now: Date) => runner.run(() => transactions.claimPendingReference(id, now));
+
+  test('round-trip de tentativas e próxima tentativa', async () => {
+    const wallet = await storedWallet();
+    const tx = await pendingRefund(wallet);
+    expect(await transactions.findById(tx.id)).toEqual(tx);
+
+    tx.scheduleReferenceRetry(at(0), at(900));
+    await transactions.savePendingReference(tx);
+
+    const read = (await transactions.findById(tx.id))!;
+    expect(read).toEqual(tx);
+    expect([read.referenceAttempts, read.nextReferenceAttemptAt]).toEqual([1, at(1)]);
+  });
+
+  test('seleção: só pendentes vencidas, nunca tentadas primeiro, depois por vencimento', async () => {
+    const wallet = await storedWallet();
+    const late = await pendingRefund(wallet, { nextReferenceAttemptAt: at(60) }); // igual ao instante: vencida
+    const early = await pendingRefund(wallet, { nextReferenceAttemptAt: at(40) });
+    const never = await pendingRefund(wallet);
+    await pendingRefund(wallet, { nextReferenceAttemptAt: at(61) }); // em backoff
+    const processed = newTx(wallet);
+    await transactions.add(processed);
+    processed.markProcessed(undefined, brl('75.00'), now());
+    await transactions.save(processed);
+
+    expect(await transactions.findDuePendingReferences(at(60), 10)).toEqual(
+      [never, early, late].map((tx) => ({ id: tx.id, walletId: wallet.id })),
+    );
+  });
+
+  test('seleção respeita o limite', async () => {
+    const wallet = await storedWallet();
+    for (let i = 0; i < 3; i++) await pendingRefund(wallet, { nextReferenceAttemptAt: at(i) });
+    expect(await transactions.findDuePendingReferences(at(60), 2)).toHaveLength(2);
+  });
+
+  test('claim devolve a pendente vencida com tentativas e próxima tentativa', async () => {
+    const wallet = await storedWallet();
+    const tx = await pendingRefund(wallet, { nextReferenceAttemptAt: at(10), referenceAttempts: 4 });
+    expect(await claim(tx.id, at(60))).toEqual(tx);
+  });
+
+  test('claim não devolve transação terminal nem reagendada para o futuro', async () => {
+    const wallet = await storedWallet();
+    const inBackoff = await pendingRefund(wallet, { nextReferenceAttemptAt: at(61) });
+    const resolved = await pendingRefund(wallet);
+    resolved.reject(FailureCode.ReferenceNotFound, brl('100.00'), now());
+    await transactions.savePendingReference(resolved);
+
+    expect(await claim(inBackoff.id, at(60))).toBeUndefined();
+    expect(await claim(resolved.id, at(60))).toBeUndefined();
+    expect(await claim(uuid(), at(60))).toBeUndefined();
+  });
+
+  test('claim de linha travada por outra transação devolve nada sem esperar', async () => {
+    const wallet = await storedWallet();
+    const tx = await pendingRefund(wallet);
+    const gate = Promise.withResolvers<void>();
+    const held = Promise.withResolvers<boolean>();
+
+    const first = runner.run(async () => {
+      held.resolve((await transactions.claimPendingReference(tx.id, at(60))) !== undefined);
+      await gate.promise; // segura o lock da linha
+    });
+    expect(await held.promise).toBe(true);
+
+    const started = Date.now();
+    expect(await claim(tx.id, at(60))).toBeUndefined(); // SKIP LOCKED
+    expect(Date.now() - started).toBeLessThan(1000);
+
+    gate.resolve();
+    await first;
+    expect(await claim(tx.id, at(60))).toEqual(tx);
+  });
+
+  test('fora de transação o claim falha', async () => {
+    const wallet = await storedWallet();
+    const tx = await pendingRefund(wallet);
+    await expect(transactions.claimPendingReference(tx.id, at(60))).rejects.toThrow(/transaction/i);
+  });
+
+  test('gravação condicionada: linha que já não está PENDING_REFERENCE não é alterada', async () => {
+    const wallet = await storedWallet();
+    const tx = await pendingRefund(wallet);
+    const stale = (await transactions.findById(tx.id))!; // cópia de outro worker
+    tx.reject(FailureCode.ReferenceNotFound, brl('100.00'), now());
+    await transactions.savePendingReference(tx);
+
+    stale.reject(FailureCode.ReferenceMismatch, brl('1.00'), now());
+    await expect(transactions.savePendingReference(stale)).rejects.toThrow(/esperava atualizar 1 linha, atualizou 0/);
+
+    expect(await transactions.findById(tx.id)).toEqual(tx);
+  });
+
+  test('antecipação: só as pendentes do provider que aguardam aquela referência, sem mexer nas tentativas', async () => {
+    const wallet = await storedWallet();
+    const backoff = { nextReferenceAttemptAt: at(500), referenceAttempts: 3 };
+    const target = await pendingRefund(wallet, backoff);
+    const otherProvider = await pendingRefund(wallet, backoff, { providerId: 'provider-b' });
+    const otherReference = await pendingRefund(wallet, backoff, { referenceExternalTransactionId: 'ref-y' });
+    const terminal = await pendingRefund(wallet, backoff);
+    terminal.reject(FailureCode.ReferenceNotFound, brl('100.00'), now());
+    await transactions.savePendingReference(terminal);
+
+    await transactions.wakePendingReferencesOf('provider-a', 'ref-x', at(10));
+
+    const read = async (tx: WagerTransaction) => {
+      const found = (await transactions.findById(tx.id))!;
+      return [found.nextReferenceAttemptAt, found.referenceAttempts];
+    };
+    expect(await read(target)).toEqual([at(10), 3]);
+    expect(await read(otherProvider)).toEqual([at(500), 3]);
+    expect(await read(otherReference)).toEqual([at(500), 3]);
+    expect(await read(terminal)).toEqual([at(500), 3]);
+  });
+});

@@ -62,6 +62,27 @@ test('consumidor SQS: valores informados', () => {
   });
 });
 
+test('worker de PENDING_REFERENCE: padrões e valores informados', () => {
+  expect(loadConfig({})).toMatchObject({
+    pendingReferenceWorkerEnabled: true,
+    pendingReferencePollIntervalMs: 1000,
+    pendingReferenceBatchSize: 20,
+    pendingReferenceTtlSeconds: 900,
+  });
+  const config = loadConfig({
+    PENDING_REFERENCE_WORKER_ENABLED: 'false',
+    PENDING_REFERENCE_POLL_INTERVAL_MS: '250',
+    PENDING_REFERENCE_BATCH_SIZE: '5',
+    PENDING_REFERENCE_TTL_SECONDS: '60',
+  });
+  expect(config).toMatchObject({
+    pendingReferenceWorkerEnabled: false,
+    pendingReferencePollIntervalMs: 250,
+    pendingReferenceBatchSize: 5,
+    pendingReferenceTtlSeconds: 60,
+  });
+});
+
 test('visibilidade menor que a margem nomeia a variável mesmo quando o culpado é o lock timeout', () => {
   expect(() => loadConfig({ DB_LOCK_TIMEOUT_MS: '30000' })).toThrow('SQS_CONSUMER_VISIBILITY_TIMEOUT_SECONDS');
 });
@@ -83,6 +104,11 @@ test.each([
   ['SQS_CONSUMER_VISIBILITY_TIMEOUT_SECONDS', 'abc'],
   ['SQS_CONSUMER_VISIBILITY_TIMEOUT_SECONDS', '10'], // = margem (lock de 5s + 5s): nada seria iniciado
   ['SQS_CONSUMER_MAX_BACKOFF_SECONDS', '0'],
+  ['PENDING_REFERENCE_WORKER_ENABLED', 'sim'],
+  ['PENDING_REFERENCE_POLL_INTERVAL_MS', '0'],
+  ['PENDING_REFERENCE_BATCH_SIZE', '1.5'],
+  ['PENDING_REFERENCE_TTL_SECONDS', '0'],
+  ['PENDING_REFERENCE_TTL_SECONDS', 'abc'],
 ])('%s=%s é recusado com erro que nomeia a variável', (name, value) => {
   expect(() => loadConfig({ [name]: value })).toThrow(name);
 });

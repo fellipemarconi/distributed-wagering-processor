@@ -14,6 +14,8 @@ process.env.DATABASE_URL =
 process.env.OUTBOX_PUBLISHER_ENABLED ??= 'false';
 // Idem para o consumidor: só os testes de test/consumer o ligam.
 process.env.SQS_CONSUMER_ENABLED ??= 'false';
+// Idem para o worker de PENDING_REFERENCE: o banco é compartilhado e ele mexeria nas pendentes das outras suítes.
+process.env.PENDING_REFERENCE_WORKER_ENABLED ??= 'false';
 
 const HINT ='Suba as dependências com `docker compose up -d --wait` (ou use `bun run test:integration`).';
 

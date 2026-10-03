@@ -55,6 +55,8 @@ export const wagerTransactionMapper = {
     completedAt: t.completedAt ?? null,
     resultBalanceAmount: t.resultBalance ? amountOf(t.resultBalance) : null,
     resultBalanceCurrency: t.resultBalance?.currency ?? null,
+    referenceAttempts: t.referenceAttempts,
+    nextReferenceAttemptAt: t.nextReferenceAttemptAt ?? null,
   }),
   toRecord: (t: WagerTransaction): WagerTransactionRecord => ({
     id: t.id,
@@ -97,6 +99,8 @@ export const wagerTransactionMapper = {
           ? money(r.resultBalanceAmount, r.resultBalanceCurrency)
           : undefined,
       completedAt: opt(r.completedAt),
+      referenceAttempts: r.referenceAttempts,
+      nextReferenceAttemptAt: opt(r.nextReferenceAttemptAt),
     }),
 };
 
