@@ -3,7 +3,10 @@ import { parseUuid } from '../application/input';
 import { WagerTransactionRepository } from '../application/ports';
 import { ProcessWagerTransaction, type ProcessWagerResult } from '../application/process-wager-transaction';
 import { WagerTransactionStatus as Status, type WagerTransaction } from '../domain/wager-transaction';
-import { apiError, correlationIdOf } from './api-error';
+import { currentCorrelationId } from '../observability/correlation.middleware';
+import { setLogContext } from '../observability/log-context';
+import { Metrics } from '../observability/metrics';
+import { apiError } from './api-error';
 import { AuthGuard } from './auth.guard';
 
 type Persisted = Extract<ProcessWagerResult, { transaction: WagerTransaction }>;
@@ -49,6 +52,7 @@ export class WageringController {
   constructor(
     private readonly processWager: ProcessWagerTransaction,
     private readonly transactions: WagerTransactionRepository,
+    private readonly metrics: Metrics,
   ) {}
 
   @Post('wagering/transactions')
@@ -56,16 +60,20 @@ export class WageringController {
     @Body() body: unknown,
     @Res({ passthrough: true }) response: { status(code: number): unknown },
     @Headers('idempotency-key') idempotencyKey?: string,
-    @Headers('x-correlation-id') correlationId?: string,
   ) {
     if (!idempotencyKey?.trim()) {
       throw apiError(400, 'MISSING_IDEMPOTENCY_KEY', 'O header Idempotency-Key é obrigatório');
     }
+    const stopTimer = this.metrics.processingDuration.startTimer({ channel: 'http' });
     // o header é a fonte da verdade da chave; um idempotencyKey no corpo é sobrescrito
-    const result = await this.processWager.execute(
-      { ...(body as object), idempotencyKey },
-      { correlationId: correlationIdOf(correlationId) },
-    );
+    const result = await this.processWager
+      .execute({ ...(body as object), idempotencyKey }, { correlationId: currentCorrelationId() })
+      .finally(stopTimer);
+    if ('transaction' in result) {
+      const { id, walletId, providerId } = result.transaction;
+      setLogContext({ transactionId: id, walletId, providerId });
+      this.metrics.recordWager('http', result.outcome, result.transaction);
+    }
     if (result.outcome === 'not-found') throw apiError(404, 'WALLET_NOT_FOUND', 'Wallet não encontrada');
     if (result.outcome === 'conflict') {
       throw apiError(
@@ -95,6 +103,7 @@ export class WageringController {
 
   private found(tx: WagerTransaction | undefined) {
     if (!tx) throw apiError(404, 'TRANSACTION_NOT_FOUND', 'Transação não encontrada');
+    setLogContext({ transactionId: tx.id, walletId: tx.walletId, providerId: tx.providerId });
     return transactionBody(tx);
   }
 }

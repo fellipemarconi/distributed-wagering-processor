@@ -41,7 +41,7 @@ describe('publicação dos eventos pendentes', () => {
     const pending = await pendingRows(app);
     expect(pending).toHaveLength(2);
 
-    expect(await runBatch(app)).toEqual({ claimed: 2, published: 2, failures: [], interrupted: false });
+    expect(await runBatch(app)).toEqual({ claimed: 2, published: 2, failures: [], publishLagsMs: [expect.any(Number), expect.any(Number)], interrupted: false });
 
     const received = (await drain()).sort((a, b) => a.deduplicationId.localeCompare(b.deduplicationId));
     expect(received).toEqual(
@@ -184,7 +184,7 @@ describe('ordem por agregado dentro do lote', () => {
     // erro não transitório: não interrompe o lote, só o agregado
     expect(result).toMatchObject({ claimed: 3, published: 1, interrupted: false });
     expect(result.failures).toEqual([
-      { eventId: a1.id, eventType: 'TestEvent', aggregateId: a1.aggregateId, attempts: 1, error: 'mensagem recusada pelo SQS' },
+      { eventId: a1.id, eventType: 'TestEvent', aggregateId: a1.aggregateId, attempts: 1, error: 'mensagem recusada pelo SQS', correlationId: `corr-${a1.id}` },
     ]);
     expect(sent).toEqual([a1.id, b1.id]); // A2 nem foi enviado
 

@@ -79,7 +79,7 @@ export async function enqueue(
     id,
     aggregateId,
     eventType: 'TestEvent',
-    payload: { eventId: id, eventType: 'TestEvent', aggregateId, occurredAt: occurredAt.toISOString(), version: 1, data: { secret: 'payload-nao-vai-para-o-log' } },
+    payload: { eventId: id, eventType: 'TestEvent', aggregateId, correlationId: `corr-${id}`, occurredAt: occurredAt.toISOString(), version: 1, data: { secret: 'payload-nao-vai-para-o-log' } },
     occurredAt,
     attempts: overrides.attempts ?? 0,
     nextAttemptAt: overrides.nextAttemptAt,

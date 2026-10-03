@@ -12,8 +12,10 @@ export function freePort(): Promise<number> {
 export interface Instance {
   proc: ReturnType<typeof Bun.spawn>;
   base: string;
-  /** Linhas de log (JSON) emitidas até agora. */
+  /** Linhas de log (JSON) emitidas até agora, de stdout e stderr (os níveis de erro saem no stderr). */
   logs(): Record<string, unknown>[];
+  /** Tudo que o processo escreveu, linha a linha, sem filtrar. */
+  lines(): string[];
 }
 
 /** Processo real da aplicação (`src/main.ts`) em uma porta livre, já respondendo em /health/live. */
@@ -22,13 +24,18 @@ export async function spawnInstance(env: Record<string, string>): Promise<Instan
   const proc = Bun.spawn(['bun', 'src/main.ts'], {
     env: { ...process.env, PORT: String(port), LOG_LEVEL: 'log', ...env },
     stdout: 'pipe',
-    stderr: 'inherit',
+    stderr: 'pipe',
   });
   let output = '';
-  void (async () => {
+  const capture = async (stream: ReadableStream<Uint8Array>, echo: boolean) => {
     const decoder = new TextDecoder();
-    for await (const chunk of proc.stdout as ReadableStream<Uint8Array>) output += decoder.decode(chunk, { stream: true });
-  })();
+    for await (const chunk of stream) {
+      output += decoder.decode(chunk, { stream: true });
+      if (echo) process.stderr.write(chunk); // warn/error do processo continuam visíveis no terminal do teste
+    }
+  };
+  void capture(proc.stdout as ReadableStream<Uint8Array>, false);
+  void capture(proc.stderr as ReadableStream<Uint8Array>, true);
 
   const base = `http://localhost:${port}`;
   const deadline = Date.now() + 15_000;
@@ -42,6 +49,7 @@ export async function spawnInstance(env: Record<string, string>): Promise<Instan
   return {
     proc,
     base,
+    lines: () => output.split('\n').filter(Boolean),
     logs: () =>
       output
         .split('\n')

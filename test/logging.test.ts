@@ -1,5 +1,6 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
 import { createLogger } from '../src/logger';
+import { runWithLogContext, setLogContext } from '../src/observability/log-context';
 
 function capture(stream: 'stdout' | 'stderr') {
   const lines: string[] = [];
@@ -51,6 +52,54 @@ test('nível mínimo warn suprime mensagens informativas', () => {
 
   logger.warn('emitida');
   expect(out).toHaveLength(1);
+});
+
+test('objeto logado sai achatado no primeiro nível, com message como texto', () => {
+  const out = capture('stdout');
+
+  createLogger('log').log({ message: 'consumida', outcome: 'processed', receiveCount: 2 }, 'Ctx');
+
+  const entry = JSON.parse(out[0]!);
+  expect(entry).toMatchObject({ level: 'log', message: 'consumida', outcome: 'processed', receiveCount: 2, context: 'Ctx' });
+});
+
+test('log dentro de um contexto traz os ids; campo explícito vence o contexto; level não é sobrescrito', () => {
+  const out = capture('stdout');
+  const logger = createLogger('log');
+
+  runWithLogContext({ correlationId: 'c-1', walletId: 'w-1' }, () => {
+    setLogContext({ transactionId: 't-1' });
+    logger.log('texto simples');
+    logger.log({ message: 'objeto', walletId: 'w-explicito', level: 'forjado' });
+  });
+  logger.log('fora do contexto');
+
+  const [plain, object, outside] = out.map((line) => JSON.parse(line));
+  expect(plain).toMatchObject({ message: 'texto simples', correlationId: 'c-1', walletId: 'w-1', transactionId: 't-1' });
+  expect(object).toMatchObject({ message: 'objeto', correlationId: 'c-1', walletId: 'w-explicito', level: 'log' });
+  expect(outside.correlationId).toBeUndefined();
+});
+
+test('setLogContext fora de contexto não lança; contextos concorrentes não se misturam', async () => {
+  const out = capture('stdout');
+  const logger = createLogger('log');
+  expect(() => setLogContext({ walletId: 'w' })).not.toThrow();
+
+  await Promise.all(
+    ['a', 'b', 'c'].map((id) =>
+      runWithLogContext({ correlationId: id }, async () => {
+        await Bun.sleep(Math.random() * 10);
+        setLogContext({ transactionId: `tx-${id}` });
+        await Bun.sleep(Math.random() * 10);
+        logger.log(id);
+      }),
+    ),
+  );
+
+  for (const entry of out.map((line) => JSON.parse(line))) {
+    expect(entry).toMatchObject({ correlationId: entry.message, transactionId: `tx-${entry.message}` });
+  }
+  expect(out).toHaveLength(3);
 });
 
 test('todas as linhas do bootstrap são JSON', async () => {

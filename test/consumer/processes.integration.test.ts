@@ -14,12 +14,8 @@ afterAll(() => admin.close());
 
 const CONSUMER = { SQS_CONSUMER_ENABLED: 'true', SQS_CONSUMER_WAIT_TIME_SECONDS: '1' };
 
-/** Entradas de log do consumidor de um processo (o Nest aninha o objeto logado em `message`). */
-const consumerLogs = (instance: Instance) =>
-  instance
-    .logs()
-    .map((line) => line.message)
-    .filter((entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null && 'outcome' in entry);
+/** Entradas de log do consumidor de um processo (só elas têm `outcome`). */
+const consumerLogs = (instance: Instance) => instance.logs().filter((entry) => 'outcome' in entry);
 
 async function stop(instance: Instance, signal: 'SIGTERM' | 'SIGKILL'): Promise<void> {
   instance.proc.kill(signal);

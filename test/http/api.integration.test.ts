@@ -4,6 +4,7 @@ import { MikroORM } from '@mikro-orm/postgresql';
 import { Clock } from '../../src/application/ports';
 import { AuthGuard } from '../../src/http/auth.guard';
 import { boot, countRows, expectLedgerInvariant, payload, uuid } from '../application/helpers';
+import { sql } from '../persistence/helpers';
 
 // Ponta a ponta: AppModule real em porta livre + fetch. Os nomes dos testes de status começam pelo
 // código HTTP — há pelo menos um para cada linha do mapeamento (ARCHITECTURE.md).
@@ -420,6 +421,65 @@ describe('consulta de transação', () => {
   });
 });
 
+describe('X-Correlation-Id', () => {
+  const HEADER = 'x-correlation-id';
+  const UUID = /^[0-9a-f-]{36}$/;
+  /** correlationId gravado nos eventos que a transação gerou. */
+  const eventCorrelations = async (transactionId: string) =>
+    (
+      await sql<{ correlation_id: string }>(
+        db,
+        `select distinct payload->>'correlationId' as correlation_id from outbox_messages
+          where aggregate_id = ? or payload->'data'->>'transactionId' = ?`,
+        [transactionId, transactionId],
+      )
+    ).map((row) => row.correlation_id);
+  const submit = async (correlationId?: string) => {
+    const { body, key } = request(await createWallet());
+    return call('POST', '/wagering/transactions', body, { 'Idempotency-Key': key, ...(correlationId !== undefined && { [HEADER]: correlationId }) });
+  };
+
+  test('informado: volta na resposta e vai para os eventos', async () => {
+    const res = await submit('abc-123');
+
+    expect(res.status).toBe(201);
+    expect(res.headers.get(HEADER)).toBe('abc-123');
+    expect(await eventCorrelations(res.body.transactionId)).toEqual(['abc-123']);
+  });
+
+  test('ausente: gerado, e é o mesmo dos eventos', async () => {
+    const res = await submit();
+
+    expect(res.headers.get(HEADER)).toMatch(UUID);
+    expect(await eventCorrelations(res.body.transactionId)).toEqual([res.headers.get(HEADER)!]);
+  });
+
+  test('inválido (longo demais ou com caracteres fora do conjunto): ignorado e substituído', async () => {
+    for (const invalid of ['x'.repeat(129), 'com espaço', 'aspas"{}']) {
+      const res = await submit(invalid);
+
+      expect(res.status).toBe(201);
+      expect(res.headers.get(HEADER)).toMatch(UUID);
+      expect(await eventCorrelations(res.body.transactionId)).toEqual([res.headers.get(HEADER)!]);
+    }
+  });
+
+  test('respostas de erro também devolvem o header: 404, rota inexistente e JSON malformado', async () => {
+    const notFound = await call('GET', `/wallets/${uuid()}`, undefined, { [HEADER]: 'abc-123' });
+    const noRoute = await call('GET', '/nope', undefined, { [HEADER]: 'abc-123' });
+    const malformed = await call('POST', '/wagering/transactions', '{"providerId": ', { 'content-type': 'application/json', [HEADER]: 'abc-123' });
+
+    expect([notFound.status, noRoute.status, malformed.status]).toEqual([404, 404, 400]);
+    expect([notFound, noRoute, malformed].map((r) => r.headers.get(HEADER))).toEqual(['abc-123', 'abc-123', 'abc-123']);
+  });
+
+  test('health e métricas também devolvem o header', async () => {
+    for (const path of ['/health/live', '/metrics']) {
+      expect((await fetch(`${url}${path}`)).headers.get(HEADER)).toMatch(UUID);
+    }
+  });
+});
+
 describe('formato de erro e autenticação', () => {
   test('rota inexistente responde no envelope de erro', async () => {
     const res = await call('GET', '/nope');
@@ -440,15 +500,17 @@ describe('formato de erro e autenticação', () => {
         call('POST', '/wagering/transactions', {}, { 'Idempotency-Key': id }, base),
         call('GET', `/wagering/transactions/${id}`, undefined, {}, base),
         call('GET', `/providers/p/wagering/transactions/${id}`, undefined, {}, base),
+        call('POST', `/wallets/${id}/reconciliation`, undefined, {}, base),
       ]);
 
-      expect(business.map((r) => r.status)).toEqual([403, 403, 403, 403, 403, 403]);
+      expect(business.map((r) => r.status)).toEqual([403, 403, 403, 403, 403, 403, 403]);
       expect(business[0]!.body).toEqual({ error: { code: 'FORBIDDEN', message: expect.any(String) } });
       expect(await countRows(app, 'wallets', 'player_id = ?', [id])).toBe(0);
 
       expect((await call('GET', '/health/live', undefined, {}, base)).status).toBe(200);
       const ready = await call('GET', '/health/ready', undefined, {}, base);
       expect([ready.status, ready.body]).toEqual([200, { status: 'ok', checks: { postgres: 'up', sqs: 'up' } }]);
+      expect((await fetch(`${base}/metrics`)).status).toBe(200);
     } finally {
       await denied?.close();
     }

@@ -74,6 +74,8 @@ export abstract class OutboxRepository {
    * publisher recebe outras linhas em vez de esperar. Exige transação aberta.
    */
   abstract claimDue(now: Date, limit: number): Promise<OutboxMessage[]>;
+  /** occurredAt do evento não publicado mais antigo; undefined se não há pendentes. */
+  abstract oldestPendingOccurredAt(): Promise<Date | undefined>;
 }
 
 /**
@@ -99,6 +101,11 @@ export abstract class TransactionRunner {
    * confirmado se a externa confirmar, e a falha dele desfaz só o que ele gravou.
    */
   abstract run<T>(work: () => Promise<T>): Promise<T>;
+  /**
+   * Somente leitura, em uma única foto do banco: todas as consultas de `work` enxergam o mesmo
+   * instante confirmado. Não pede lock nem espera o de ninguém.
+   */
+  abstract snapshot<T>(work: () => Promise<T>): Promise<T>;
 }
 
 export abstract class IdGenerator {

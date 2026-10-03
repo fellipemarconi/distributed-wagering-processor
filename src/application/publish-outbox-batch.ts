@@ -7,12 +7,16 @@ export interface PublishFailure {
   /** Tentativas já feitas, contando esta. */
   attempts: number;
   error: string;
+  /** Correlação gravada no envelope do evento. */
+  correlationId?: string;
 }
 
 export interface PublishOutboxBatchResult {
   claimed: number;
   published: number;
   failures: PublishFailure[];
+  /** Um por publicação aceita: publishedAt − occurredAt. */
+  publishLagsMs: number[];
   /** O destino estava indisponível e o lote parou antes do fim. */
   interrupted: boolean;
 }
@@ -34,7 +38,7 @@ export class PublishOutboxBatch {
   execute(): Promise<PublishOutboxBatchResult> {
     return this.tx.run(async () => {
       const messages = await this.outbox.claimDue(this.clock.now(), this.batchSize);
-      const result: PublishOutboxBatchResult = { claimed: messages.length, published: 0, failures: [], interrupted: false };
+      const result: PublishOutboxBatchResult = { claimed: messages.length, published: 0, failures: [], publishLagsMs: [], interrupted: false };
       const failedAggregates = new Set<string>();
 
       for (const message of messages) {
@@ -44,8 +48,10 @@ export class PublishOutboxBatch {
 
         try {
           await this.publisher.publish(message);
-          message.markPublished(this.clock.now());
+          const publishedAt = this.clock.now();
+          message.markPublished(publishedAt);
           result.published += 1;
+          result.publishLagsMs.push(publishedAt.getTime() - message.occurredAt.getTime());
         } catch (error) {
           message.scheduleRetry(this.clock.now());
           failedAggregates.add(message.aggregateId);
@@ -55,6 +61,7 @@ export class PublishOutboxBatch {
             aggregateId: message.aggregateId,
             attempts: message.attempts,
             error: describe(error),
+            correlationId: typeof message.payload.correlationId === 'string' ? message.payload.correlationId : undefined,
           });
           result.interrupted = error instanceof EventPublisherUnavailableError;
         }

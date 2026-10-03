@@ -417,6 +417,65 @@ describe('claim da outbox', () => {
   test('fora de transação o claim falha', async () => {
     await expect(outbox.claimDue(at(60), 10)).rejects.toThrow(/transaction/i);
   });
+
+  test('pendente mais antiga: ausente sem pendentes; ignora publicadas; em backoff também conta', async () => {
+    expect(await outbox.oldestPendingOccurredAt()).toBeUndefined();
+
+    await pending(at(0), { publishedAt: at(1) }); // mais antiga, mas já publicada
+    await pending(at(30));
+    await pending(at(10), { nextAttemptAt: at(999) });
+
+    expect(await outbox.oldestPendingOccurredAt()).toEqual(at(10));
+  });
+});
+
+describe('foto consistente (snapshot)', () => {
+  const balanceIn = async (walletId: string) => (await wallets.findById(walletId))!.balance.toJSON().amount;
+
+  test('escrita confirmada por outra conexão depois da primeira leitura não é vista', async () => {
+    const wallet = await storedWallet(brl('100.00'));
+
+    const seen = await runner.snapshot(async () => {
+      const before = await balanceIn(wallet.id);
+      // outra conexão (fork fora do contexto da transação) confirma um saldo novo
+      await orm.em.fork().getConnection().execute('update wallets set balance = 40 where id = ?', [wallet.id]);
+      return [before, await balanceIn(wallet.id)];
+    });
+
+    expect(seen).toEqual(['100.00', '100.00']);
+    expect(await balanceIn(wallet.id)).toBe('40.00');
+  });
+
+  test('escrita dentro do snapshot é recusada pelo banco', async () => {
+    const wallet = await storedWallet();
+    const attempt = runner.snapshot(async () => {
+      const loaded = (await wallets.findById(wallet.id))!;
+      loaded.debit(brl('10.00'), movement(uuid()));
+      await wallets.save(loaded);
+    });
+
+    await expect(attempt).rejects.toThrow(/read-only transaction/i);
+    expect(await balanceIn(wallet.id)).toBe('100.00');
+  });
+
+  test('não espera o FOR UPDATE mantido por outra transação', async () => {
+    const wallet = await storedWallet(brl('100.00'));
+    const gate = Promise.withResolvers<void>();
+    const locked = Promise.withResolvers<void>();
+    const holder = runner.run(async () => {
+      await wallets.findByIdForUpdate(wallet.id);
+      locked.resolve();
+      await gate.promise;
+    });
+    await locked.promise;
+
+    const started = Date.now();
+    expect(await runner.snapshot(() => balanceIn(wallet.id))).toBe('100.00');
+    expect(Date.now() - started).toBeLessThan(1000);
+
+    gate.resolve();
+    await holder;
+  });
 });
 
 describe('persistência atômica', () => {

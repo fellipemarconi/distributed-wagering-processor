@@ -254,7 +254,16 @@ describe('referência ainda ausente', () => {
     const first = await reprocess(app);
     expect(first).toMatchObject({ selected: 1, rejected: 1 });
     expect(first.outcomes as unknown[]).toEqual([
-      { transactionId: refund.id, outcome: 'rejected', failureCode: 'REFERENCE_NOT_FOUND', attempts: 0 },
+      {
+        transactionId: refund.id,
+        walletId: w.id,
+        providerId: 'provider-a',
+        kind: 'REFUND',
+        outcome: 'rejected',
+        failureCode: 'REFERENCE_NOT_FOUND',
+        attempts: 0,
+        durationMs: expect.any(Number),
+      },
     ]);
     // a rejeição do REFUND antecipou o ROLLBACK que o aguardava
     const woken = await txRow(app, rollback.id);

@@ -19,6 +19,8 @@ import {
 import { identifyMessage, ProcessWagerMessage, type DeadLetterReason } from '../application/process-wager-message';
 import { CONFIG, visibilityMarginMs, type Config } from '../config';
 import { backoffDelayMs } from '../domain/backoff';
+import { runWithLogContext, setLogContext } from '../observability/log-context';
+import { Metrics } from '../observability/metrics';
 import { isTransientInfraError } from './persistence/transient-error';
 import { SQS_CLIENT } from './sqs.provider';
 
@@ -36,6 +38,7 @@ export class SqsWagerConsumer implements OnApplicationBootstrap, BeforeApplicati
 
   constructor(
     private readonly processMessage: ProcessWagerMessage,
+    private readonly metrics: Metrics,
     @Inject(SQS_CLIENT) private readonly sqs: SQSClient,
     @Inject(CONFIG) private readonly config: Config,
   ) {}
@@ -117,20 +120,39 @@ export class SqsWagerConsumer implements OnApplicationBootstrap, BeforeApplicati
   }
 
   /** Devolve o adiamento (em segundos) quando a mensagem ficou para nova tentativa. */
-  private async handle(message: Message): Promise<number | undefined> {
+  private handle(message: Message): Promise<number | undefined> {
     const body = message.Body ?? '';
+    // contexto de log da mensagem: os avisos de ack e de visibilidade também saem com os ids
+    return runWithLogContext(this.ids(body), async () => {
+      const stopTimer = this.metrics.processingDuration.startTimer({ channel: 'sqs' });
+      try {
+        return await this.process(message, body);
+      } finally {
+        stopTimer();
+      }
+    });
+  }
+
+  private async process(message: Message, body: string): Promise<number | undefined> {
     const receiveCount = Number(message.Attributes?.ApproximateReceiveCount ?? 1);
     try {
       const result = await this.processMessage.execute(body);
       // execute retornou: o commit já aconteceu (ou nada foi gravado)
       if (result.outcome === 'dead') {
         await this.sendToDlq(message, result.reason);
+        this.metrics.dlqMessages.inc({ reason: result.reason });
         await this.ack(message);
         this.logger.warn({ message: 'Mensagem enviada para a DLQ', outcome: 'dead', reason: result.reason, ...this.ids(body), receiveCount });
         return undefined;
       }
       await this.ack(message);
       const tx = 'transaction' in result ? result.transaction : undefined;
+      if (tx) {
+        setLogContext({ transactionId: tx.id });
+        this.metrics.recordWager('sqs', result.outcome, tx);
+      } else {
+        this.metrics.duplicates.inc({ type: 'inbox_duplicate', channel: 'sqs' });
+      }
       this.logger.log({
         message: 'Mensagem consumida',
         outcome: result.outcome,
@@ -145,6 +167,7 @@ export class SqsWagerConsumer implements OnApplicationBootstrap, BeforeApplicati
       const transient = isTransientInfraError(error);
       const delaySeconds = Math.min(backoffDelayMs(receiveCount) / 1000, this.config.sqsConsumerMaxBackoffSeconds);
       await this.changeVisibility(message, delaySeconds);
+      this.metrics.retries.inc({ source: 'sqs_consumer' });
       const entry = { message: 'Mensagem será reenviada', outcome: 'retry', transient, ...this.ids(body), receiveCount, delaySeconds };
       if (transient) this.logger.warn({ ...entry, error: (error as Error).name });
       else this.logger.error(entry, error instanceof Error ? error.stack : String(error));

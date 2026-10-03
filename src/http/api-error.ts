@@ -1,8 +1,8 @@
 import { type ArgumentsHost, Catch, HttpException, Logger } from '@nestjs/common';
 import { BaseExceptionFilter } from '@nestjs/core';
-import { randomUUID } from 'node:crypto';
 import { InvalidPayloadError } from '../application/input';
 import { isTransientInfraError } from '../infra/persistence/transient-error';
+import { CORRELATION_HEADER, correlationIdFrom } from '../observability/correlation.middleware';
 
 interface ErrorBody {
   error: { code: string; message: string };
@@ -12,8 +12,6 @@ interface ErrorBody {
 export function apiError(status: number, code: string, message: string): HttpException {
   return new HttpException({ error: { code, message } } satisfies ErrorBody, status);
 }
-
-export const correlationIdOf = (header: string | undefined): string => header?.trim() || randomUUID();
 
 const RETRY_AFTER_SECONDS = '1';
 const CODE_BY_STATUS: Record<number, string> = {
@@ -34,13 +32,19 @@ export class ApiExceptionFilter extends BaseExceptionFilter {
   override catch(exception: unknown, host: ArgumentsHost): void {
     const http = host.switchToHttp();
     // /health tem contrato próprio de corpo (estado das dependências): segue o tratamento padrão
-    if (http.getRequest<{ url: string }>().url.startsWith('/health')) return super.catch(exception, host);
+    const request = http.getRequest<{ url: string; headers: Record<string, unknown> }>();
+    if (request.url.startsWith('/health')) return super.catch(exception, host);
 
     const { status, body } = this.describe(exception);
     const response = http.getResponse<{
+      getHeader(name: string): unknown;
       setHeader(name: string, value: string): void;
       status(code: number): { json(body: unknown): void };
     }>();
+    // erro anterior ao middleware de correlação (JSON malformado no body parser): o header sai daqui
+    if (!response.getHeader(CORRELATION_HEADER)) {
+      response.setHeader(CORRELATION_HEADER, correlationIdFrom(request.headers['x-correlation-id']));
+    }
     if (status === 503) response.setHeader('Retry-After', RETRY_AFTER_SECONDS);
     response.status(status).json(body);
   }

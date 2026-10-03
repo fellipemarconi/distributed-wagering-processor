@@ -1,6 +1,6 @@
 import { FailureCode } from '../domain/failure-code';
 import { OutboxMessage } from '../domain/outbox-message';
-import { WagerTransactionStatus as Status } from '../domain/wager-transaction';
+import { WagerTransactionStatus as Status, type WagerTransactionKind } from '../domain/wager-transaction';
 import {
   Clock,
   IdGenerator,
@@ -17,7 +17,12 @@ type Outcome = 'processed' | 'rejected' | 'rescheduled' | 'skipped' | 'failed';
 /** Sem valores monetários: é o que o worker loga. */
 export interface CandidateOutcome {
   transactionId: string;
+  walletId: string;
+  /** Ausentes quando a transação não chegou a ser carregada (skipped, failed). */
+  providerId?: string;
+  kind?: WagerTransactionKind;
   outcome: Outcome;
+  durationMs?: number;
   failureCode?: FailureCode;
   /** Tentativas sem a referência, contando esta. */
   attempts?: number;
@@ -68,12 +73,19 @@ export class ReprocessPendingReferences {
     for (const candidate of candidates) {
       if (stopping()) break;
       let outcome: CandidateOutcome;
+      const startedAt = performance.now();
       try {
         outcome = await this.reprocess(candidate.id, candidate.walletId);
       } catch (error) {
         // lock_timeout, conexão…: só esta candidata é desfeita; continua vencida para a próxima rodada
-        outcome = { transactionId: candidate.id, outcome: 'failed', error: error instanceof Error ? error.message : String(error) };
+        outcome = {
+          transactionId: candidate.id,
+          walletId: candidate.walletId,
+          outcome: 'failed',
+          error: error instanceof Error ? error.message : String(error),
+        };
       }
+      outcome.durationMs = performance.now() - startedAt;
       result[outcome.outcome] += 1;
       result.outcomes.push(outcome);
     }
@@ -86,7 +98,8 @@ export class ReprocessPendingReferences {
       // instante lido depois do lock: quem esperou outro worker vê o reagendamento dele como futuro
       const at = this.clock.now();
       const tx = wallet && (await this.transactions.claimPendingReference(id, at));
-      if (!wallet || !tx) return { transactionId: id, outcome: 'skipped' };
+      if (!wallet || !tx) return { transactionId: id, walletId, outcome: 'skipped' };
+      const ids = { transactionId: id, walletId, providerId: tx.providerId, kind: tx.kind };
 
       const entry = await this.decision.decide(tx, wallet, at);
       if (tx.status === Status.PendingReference) {
@@ -100,7 +113,7 @@ export class ReprocessPendingReferences {
         await this.ledger.append(entry);
         await this.wallets.save(wallet);
       }
-      if (!tx.isTerminal()) return { transactionId: id, outcome: 'rescheduled', attempts: tx.referenceAttempts };
+      if (!tx.isTerminal()) return { ...ids, outcome: 'rescheduled', attempts: tx.referenceAttempts };
 
       // o correlationId da submissão original não é persistido: o id da transação liga estes
       // eventos ao WagerTransactionPendingReference dela
@@ -110,8 +123,8 @@ export class ReprocessPendingReferences {
       // cadeias (ROLLBACK → REFUND → BET): quem aguardava esta transação é reavaliado já
       await this.transactions.wakePendingReferencesOf(tx.providerId, tx.externalTransactionId, at);
       return tx.status === Status.Rejected
-        ? { transactionId: id, outcome: 'rejected', failureCode: tx.failureCode, attempts: tx.referenceAttempts }
-        : { transactionId: id, outcome: 'processed', attempts: tx.referenceAttempts };
+        ? { ...ids, outcome: 'rejected', failureCode: tx.failureCode, attempts: tx.referenceAttempts }
+        : { ...ids, outcome: 'processed', attempts: tx.referenceAttempts };
     });
   }
 }

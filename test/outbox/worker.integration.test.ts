@@ -92,7 +92,7 @@ test('acima do limiar de tentativas cada falha gera warning, sem payload, e o ev
     expect(freshRow).toMatchObject({ attempts: 1, published_at: null });
 
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0]![0]).toMatchObject({ eventId: stuck.id, eventType: 'TestEvent', aggregateId: stuck.aggregateId, attempts: 7 });
+    expect(warn.mock.calls[0]![0]).toMatchObject({ eventId: stuck.id, eventType: 'TestEvent', aggregateId: stuck.aggregateId, attempts: 7, correlationId: `corr-${stuck.id}` });
     expect(JSON.stringify(warn.mock.calls)).not.toContain('payload-nao-vai-para-o-log');
   } finally {
     warn.mockRestore();

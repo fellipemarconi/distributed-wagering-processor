@@ -1,4 +1,4 @@
-import { type DynamicModule, Module, type Provider } from '@nestjs/common';
+import { type DynamicModule, type MiddlewareConsumer, Module, type NestModule, type Provider } from '@nestjs/common';
 import { APP_FILTER } from '@nestjs/core';
 import { MikroOrmModule } from '@mikro-orm/nestjs';
 import { CreateWallet } from './application/create-wallet';
@@ -16,7 +16,10 @@ import {
 import { ProcessWagerMessage } from './application/process-wager-message';
 import { ProcessWagerTransaction } from './application/process-wager-transaction';
 import { PublishOutboxBatch } from './application/publish-outbox-batch';
+import { ReconcileWallet } from './application/reconcile-wallet';
 import { ReprocessPendingReferences } from './application/reprocess-pending-references';
+import { correlationMiddleware } from './observability/correlation.middleware';
+import { Metrics, MetricsController } from './observability/metrics';
 import { PendingReferenceWorker } from './infra/pending-reference.worker';
 import { CONFIG, type Config } from './config';
 import { HealthController } from './health/health.controller';
@@ -57,6 +60,11 @@ const useCases: Provider[] = [
     useFactory: (...deps: ConstructorParameters<typeof ProcessWagerMessage>) => new ProcessWagerMessage(...deps),
   },
   {
+    provide: ReconcileWallet,
+    inject: [TransactionRunner, WalletRepository, LedgerRepository],
+    useFactory: (...deps: ConstructorParameters<typeof ReconcileWallet>) => new ReconcileWallet(...deps),
+  },
+  {
     provide: PublishOutboxBatch,
     inject: [TransactionRunner, OutboxRepository, EventPublisher, Clock, CONFIG],
     useFactory: (tx: TransactionRunner, outbox: OutboxRepository, publisher: EventPublisher, clock: Clock, config: Config) =>
@@ -77,14 +85,18 @@ const useCases: Provider[] = [
 ];
 
 @Module({})
-export class AppModule {
+export class AppModule implements NestModule {
   // config entra por parâmetro para os testes subirem o módulo real apontando para outros endpoints
   static forRoot(config: Config): DynamicModule {
     return {
       module: AppModule,
+      // global só para exportar Metrics: o TransactionRunner do PersistenceModule também conta nela
+      global: true,
+      exports: [Metrics],
       imports: [MikroOrmModule.forRoot(ormOptions(config)), PersistenceModule],
-      controllers: [HealthController, WalletsController, WageringController],
+      controllers: [HealthController, MetricsController, WalletsController, WageringController],
       providers: [
+        Metrics,
         { provide: CONFIG, useValue: config },
         sqsProvider,
         // classe concreta também registrada: os testes embrulham o adapter real em vez de mocká-lo
@@ -97,5 +109,10 @@ export class AppModule {
         PendingReferenceWorker,
       ],
     };
+  }
+
+  // no módulo, e não em main.ts, para valer também nos testes que sobem o AppModule
+  configure(consumer: MiddlewareConsumer): void {
+    consumer.apply(correlationMiddleware).forRoutes('{*splat}');
   }
 }

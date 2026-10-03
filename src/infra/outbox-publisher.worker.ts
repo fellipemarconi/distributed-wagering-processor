@@ -7,6 +7,7 @@ import {
 } from '@nestjs/common';
 import { PublishOutboxBatch } from '../application/publish-outbox-batch';
 import { CONFIG, type Config } from '../config';
+import { Metrics } from '../observability/metrics';
 
 /** Nenhum evento é abandonado; acima disso, cada nova falha vira warning (sinal operacional). */
 const WARN_AFTER_ATTEMPTS = 5;
@@ -20,6 +21,7 @@ export class OutboxPublisherWorker implements OnApplicationBootstrap, BeforeAppl
 
   constructor(
     private readonly batch: PublishOutboxBatch,
+    private readonly metrics: Metrics,
     @Inject(CONFIG) private readonly config: Config,
   ) {}
 
@@ -46,6 +48,8 @@ export class OutboxPublisherWorker implements OnApplicationBootstrap, BeforeAppl
   private async runBatch(): Promise<boolean> {
     try {
       const result = await this.batch.execute();
+      for (const lagMs of result.publishLagsMs) this.metrics.outboxPublishLag.observe(lagMs / 1000);
+      this.metrics.retries.inc({ source: 'outbox' }, result.failures.length);
       for (const failure of result.failures) {
         // sem o payload: nada de dado financeiro em log
         const level = failure.attempts > WARN_AFTER_ATTEMPTS ? 'warn' : 'debug';

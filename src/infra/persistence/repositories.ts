@@ -1,5 +1,5 @@
-import { Injectable } from '@nestjs/common';
-import { LockMode, QueryOrder, UniqueConstraintViolationException } from '@mikro-orm/core';
+import { Injectable, Optional } from '@nestjs/common';
+import { IsolationLevel, LockMode, QueryOrder, UniqueConstraintViolationException } from '@mikro-orm/core';
 import { EntityManager } from '@mikro-orm/postgresql';
 import {
   InboxRepository,
@@ -16,6 +16,8 @@ import type { WalletLedgerEntry } from '../../domain/ledger-entry';
 import type { OutboxMessage } from '../../domain/outbox-message';
 import { WagerTransactionKind, WagerTransactionStatus, type WagerTransaction } from '../../domain/wager-transaction';
 import type { Wallet } from '../../domain/wallet';
+import { Metrics } from '../../observability/metrics';
+import { sqlStateOf } from './transient-error';
 import {
   inboxMessageMapper,
   ledgerEntryMapper,
@@ -62,14 +64,48 @@ const duePendingReference = (now: Date) => ({
   $or: [{ nextReferenceAttemptAt: null }, { nextReferenceAttemptAt: { $lte: now } }],
 });
 
+const LOCK_CONFLICT_BY_SQLSTATE: Record<string, string> = { '55P03': 'lock_timeout', '40P01': 'deadlock' };
+// Corridas que o lock da wallet não serializa e a unicidade decide. Constraint nova de idempotência
+// entra aqui. uq_wallets_player_currency fica de fora: wallet duplicada é conflito de negócio.
+const RACE_CONSTRAINTS = ['uq_wager_tx_provider_idempotency_key', 'uq_wager_tx_provider_external', 'pk_inbox_messages'];
+
 @Injectable()
 export class MikroOrmTransactionRunner extends TransactionRunner {
-  constructor(private readonly em: EntityManager) {
+  /** `run` é reentrante: o mesmo erro atravessa o interno e o externo, e conta uma vez só. */
+  private readonly counted = new WeakSet<object>();
+
+  constructor(
+    private readonly em: EntityManager,
+    // opcional: o PersistenceModule também sobe sozinho, sem o módulo de métricas
+    @Optional() private readonly metrics?: Metrics,
+  ) {
     super();
   }
 
-  run<T>(work: () => Promise<T>): Promise<T> {
-    return this.em.transactional(() => work());
+  async run<T>(work: () => Promise<T>): Promise<T> {
+    try {
+      return await this.em.transactional(() => work());
+    } catch (error) {
+      this.countLockConflict(error);
+      throw error;
+    }
+  }
+
+  // REPEATABLE READ no PostgreSQL é snapshot isolation; somente leitura, não sofre falha de
+  // serialização e o banco recusa qualquer escrita.
+  snapshot<T>(work: () => Promise<T>): Promise<T> {
+    return this.em.transactional(() => work(), { isolationLevel: IsolationLevel.REPEATABLE_READ, readOnly: true });
+  }
+
+  private countLockConflict(error: unknown): void {
+    if (!(error instanceof Error) || this.counted.has(error)) return;
+    const type =
+      error instanceof UniqueViolationError
+        ? RACE_CONSTRAINTS.includes(error.constraint) && 'unique_violation'
+        : LOCK_CONFLICT_BY_SQLSTATE[sqlStateOf(error) ?? ''];
+    if (!type) return;
+    this.counted.add(error);
+    this.metrics?.lockConflicts.inc({ type });
   }
 }
 
@@ -291,5 +327,14 @@ export class MikroOrmOutboxRepository extends OutboxRepository {
       },
     );
     return records.map(outboxMessageMapper.toDomain);
+  }
+
+  async oldestPendingOccurredAt(): Promise<Date | undefined> {
+    const record = await this.em.findOne(
+      OutboxMessageSchema,
+      { publishedAt: null },
+      { ...FRESH, fields: ['occurredAt'], orderBy: { occurredAt: QueryOrder.ASC } },
+    );
+    return record?.occurredAt;
   }
 }
