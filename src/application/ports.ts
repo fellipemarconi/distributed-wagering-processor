@@ -32,6 +32,8 @@ export abstract class WagerTransactionRepository {
   abstract findById(id: string): Promise<WagerTransaction | undefined>;
   abstract findByExternalId(providerId: string, externalTransactionId: string): Promise<WagerTransaction | undefined>;
   abstract findByIdempotencyKey(providerId: string, idempotencyKey: string): Promise<WagerTransaction | undefined>;
+  /** Já existe REFUND ou ROLLBACK em PROCESSED cuja referência resolvida é esta transação. */
+  abstract hasProcessedReversalOf(referenceTransactionId: string): Promise<boolean>;
 }
 
 export interface LedgerPage {

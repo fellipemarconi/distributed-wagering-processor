@@ -232,6 +232,7 @@ test('taxonomia de FailureCode é exatamente a documentada', () => {
     'REFERENCE_NOT_FOUND',
     'REFERENCE_NOT_PROCESSED',
     'REVERSAL_INSUFFICIENT_FUNDS',
+    'WALLET_PLAYER_MISMATCH',
   ]);
   expect(JSON.stringify({ code: FailureCode.InsufficientFunds })).toBe('{"code":"INSUFFICIENT_FUNDS"}');
 });

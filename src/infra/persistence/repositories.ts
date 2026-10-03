@@ -14,7 +14,7 @@ import {
 import type { InboxMessage } from '../../domain/inbox-message';
 import type { WalletLedgerEntry } from '../../domain/ledger-entry';
 import type { OutboxMessage } from '../../domain/outbox-message';
-import type { WagerTransaction } from '../../domain/wager-transaction';
+import { WagerTransactionKind, WagerTransactionStatus, type WagerTransaction } from '../../domain/wager-transaction';
 import type { Wallet } from '../../domain/wallet';
 import {
   inboxMessageMapper,
@@ -128,6 +128,20 @@ export class MikroOrmWagerTransactionRepository extends WagerTransactionReposito
 
   findByIdempotencyKey(providerId: string, idempotencyKey: string): Promise<WagerTransaction | undefined> {
     return this.findOne({ providerId, idempotencyKey });
+  }
+
+  // mesmo predicado do índice parcial uq_wager_tx_processed_reversal
+  async hasProcessedReversalOf(referenceTransactionId: string): Promise<boolean> {
+    const record = await this.em.findOne(
+      WagerTransactionSchema,
+      {
+        referenceTransactionId,
+        kind: { $in: [WagerTransactionKind.Refund, WagerTransactionKind.Rollback] },
+        status: WagerTransactionStatus.Processed,
+      },
+      { ...FRESH, fields: ['id'] },
+    );
+    return record !== null;
   }
 
   private async findOne(where: Record<string, string>): Promise<WagerTransaction | undefined> {

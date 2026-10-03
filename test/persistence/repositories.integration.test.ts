@@ -160,6 +160,28 @@ describe('round-trip', () => {
     expect(error.constraint).toBe('uq_wager_tx_processed_reversal');
   });
 
+  test('hasProcessedReversalOf só conta REFUND/ROLLBACK aplicados', async () => {
+    const wallet = await storedWallet();
+    const bet = newTx(wallet);
+    await transactions.add(bet);
+    bet.markProcessed(undefined, brl('75.00'), now());
+    await transactions.save(bet);
+    const referencing = async (kind: Kind, transition: (tx: WagerTransaction) => void) => {
+      const tx = newTx(wallet, { kind, referenceExternalTransactionId: bet.externalTransactionId });
+      await transactions.add(tx);
+      transition(tx);
+      await transactions.save(tx);
+    };
+
+    await referencing(Kind.Win, (tx) => tx.markProcessed(bet.id, brl('100.00'), now()));
+    await referencing(Kind.Refund, (tx) => tx.reject(FailureCode.ReferenceAmountMismatch, brl('75.00'), now()));
+    await referencing(Kind.Rollback, (tx) => tx.markPendingReference());
+    expect(await transactions.hasProcessedReversalOf(bet.id)).toBe(false);
+
+    await referencing(Kind.Refund, (tx) => tx.markProcessed(bet.id, brl('100.00'), now()));
+    expect(await transactions.hasProcessedReversalOf(bet.id)).toBe(true);
+  });
+
   test('lançamento de ledger', async () => {
     const wallet = await storedWallet();
     const tx = newTx(wallet);
