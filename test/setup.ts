@@ -11,20 +11,23 @@ process.env.DATABASE_URL =
 
 const HINT = 'Suba as dependências com `docker compose up -d --wait` (ou use `bun run test:integration`).';
 
-const config = loadConfig();
-const orm = await MikroORM.init({ ...ormOptions(config), logger: () => {} });
-try {
+// SKIP_INFRA=1 (script test:unit): testes de domínio puro não precisam de Postgres/SQS.
+if (process.env.SKIP_INFRA !== '1') {
+  const config = loadConfig();
+  const orm = await MikroORM.init({ ...ormOptions(config), logger: () => {} });
   try {
-    await orm.em.getDriver().getConnection().execute('select 1');
-  } catch {
-    throw new Error(`PostgreSQL de teste inacessível. ${HINT}`);
+    try {
+      await orm.em.getDriver().getConnection().execute('select 1');
+    } catch {
+      throw new Error(`PostgreSQL de teste inacessível. ${HINT}`);
+    }
+    try {
+      await createSqsClient(config).send(new GetQueueUrlCommand({ QueueName: config.sqsQueueName }));
+    } catch {
+      throw new Error(`SQS inacessível ou fila ${config.sqsQueueName} inexistente. ${HINT}`);
+    }
+    await orm.getMigrator().up();
+  } finally {
+    await orm.close();
   }
-  try {
-    await createSqsClient(config).send(new GetQueueUrlCommand({ QueueName: config.sqsQueueName }));
-  } catch {
-    throw new Error(`SQS inacessível ou fila ${config.sqsQueueName} inexistente. ${HINT}`);
-  }
-  await orm.getMigrator().up();
-} finally {
-  await orm.close();
 }
