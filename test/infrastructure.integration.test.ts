@@ -31,5 +31,5 @@ test('a fila principal redireciona para a DLQ', async () => {
 
   const redrive = JSON.parse(main.RedrivePolicy ?? '{}');
   expect(redrive.deadLetterTargetArn).toBe(dlq.QueueArn);
-  expect(Number(redrive.maxReceiveCount)).toBeGreaterThan(0);
+  expect(Number(redrive.maxReceiveCount)).toBe(8);
 });

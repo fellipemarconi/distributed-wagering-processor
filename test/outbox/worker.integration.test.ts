@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeEach, expect, spyOn, test } from 'bun:test';
-import { createServer } from 'node:net';
 import { Logger, type INestApplication } from '@nestjs/common';
 import { boot, openWallet } from '../application/helpers';
+import { freePort } from '../process';
 import { SQS_DOWN, drain, enqueue, pendingRows, quiesce, rows, waitFor, wrapPublisher } from './helpers';
 
 // `admin` não publica: serve para gravar e consultar. Os publishers ligados nascem em cada teste.
@@ -135,12 +135,3 @@ test('crash depois do commit e antes de publicar: outra instância publica', asy
 
   expect((await drain()).map((m) => m.deduplicationId).sort()).toEqual([...ids].sort());
 }, 30_000);
-
-function freePort(): Promise<number> {
-  return new Promise((resolve) => {
-    const server = createServer().listen(0, '127.0.0.1', () => {
-      const { port } = server.address() as { port: number };
-      server.close(() => resolve(port));
-    });
-  });
-}

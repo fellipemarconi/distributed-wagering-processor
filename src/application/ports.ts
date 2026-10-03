@@ -82,7 +82,11 @@ export abstract class EventPublisher {
 }
 
 export abstract class TransactionRunner {
-  /** Tudo que os repositórios gravarem dentro de `work` é confirmado ou descartado junto. */
+  /**
+   * Tudo que os repositórios gravarem dentro de `work` é confirmado ou descartado junto.
+   * Reentrante: um `run` dentro de outro participa da transação externa (savepoint) — só é
+   * confirmado se a externa confirmar, e a falha dele desfaz só o que ele gravou.
+   */
   abstract run<T>(work: () => Promise<T>): Promise<T>;
 }
 

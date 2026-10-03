@@ -12,6 +12,8 @@ process.env.DATABASE_URL =
 // Publisher desligado por padrão: só os testes da outbox o ligam (por override de Config),
 // para as demais suítes não publicarem na fila de eventos.
 process.env.OUTBOX_PUBLISHER_ENABLED ??= 'false';
+// Idem para o consumidor: só os testes de test/consumer o ligam.
+process.env.SQS_CONSUMER_ENABLED ??= 'false';
 
 const HINT ='Suba as dependências com `docker compose up -d --wait` (ou use `bun run test:integration`).';
 
@@ -25,7 +27,7 @@ if (process.env.SKIP_INFRA !== '1') {
     } catch {
       throw new Error(`PostgreSQL de teste inacessível. ${HINT}`);
     }
-    for (const QueueName of [config.sqsQueueName, config.outboxQueueName]) {
+    for (const QueueName of [config.sqsQueueName, config.sqsDlqName, config.outboxQueueName]) {
       try {
         await createSqsClient(config).send(new GetQueueUrlCommand({ QueueName }));
       } catch {

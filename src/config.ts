@@ -18,8 +18,24 @@ export interface Config {
   /** Limite de cada envio ao SQS, incluindo o retry interno do SDK. */
   outboxPublishTimeoutMs: number;
   outboxQueueName: string;
+  /** Liga o consumidor da fila de transações nesta instância. Desligado, a instância só atende HTTP. */
+  sqsConsumerEnabled: boolean;
+  sqsDlqName: string;
+  /** Mensagens por receive (1–10): é também o limite de processamento paralelo da instância. */
+  sqsConsumerBatchSize: number;
+  sqsConsumerWaitTimeSeconds: number;
+  sqsConsumerVisibilityTimeoutSeconds: number;
+  /** Teto do adiamento de uma mensagem que falhou de forma transitória. */
+  sqsConsumerMaxBackoffSeconds: number;
   logLevel: LogLevelName;
 }
+
+/** Folga, além da espera máxima por lock, para commit e ack antes de a visibilidade vencer. */
+const VISIBILITY_SLACK_MS = 5000;
+
+/** Tempo mínimo de visibilidade restante para o consumidor iniciar uma mensagem. */
+export const visibilityMarginMs = (config: Pick<Config, 'dbLockTimeoutMs'>): number =>
+  config.dbLockTimeoutMs + VISIBILITY_SLACK_MS;
 
 export const CONFIG = Symbol('CONFIG');
 
@@ -36,16 +52,27 @@ export function loadConfig(env: Env = process.env): Config {
     throw new Error(`Configuração inválida: LOG_LEVEL="${logLevel}" (use ${LOG_LEVELS.join(' | ')})`);
   }
 
-  const outboxPublisherEnabled = env.OUTBOX_PUBLISHER_ENABLED || 'true';
-  if (outboxPublisherEnabled !== 'true' && outboxPublisherEnabled !== 'false') {
-    throw new Error(`Configuração inválida: OUTBOX_PUBLISHER_ENABLED="${outboxPublisherEnabled}" (use true | false)`);
+  const dbLockTimeoutMs = positiveInt(env, 'DB_LOCK_TIMEOUT_MS', 5000);
+  const sqsConsumerVisibilityTimeoutSeconds = positiveInt(env, 'SQS_CONSUMER_VISIBILITY_TIMEOUT_SECONDS', 30);
+  const marginMs = visibilityMarginMs({ dbLockTimeoutMs });
+  if (sqsConsumerVisibilityTimeoutSeconds * 1000 <= marginMs) {
+    // abaixo da margem o consumidor nunca iniciaria mensagem alguma
+    throw new Error(
+      `Configuração inválida: SQS_CONSUMER_VISIBILITY_TIMEOUT_SECONDS=${sqsConsumerVisibilityTimeoutSeconds} deve ser maior que DB_LOCK_TIMEOUT_MS + 5s (${marginMs}ms)`,
+    );
   }
 
   return {
     port,
     databaseUrl: url(env, 'DATABASE_URL', 'postgres://wagering:wagering@localhost:5432/wagering'),
-    dbLockTimeoutMs: positiveInt(env, 'DB_LOCK_TIMEOUT_MS', 5000),
-    outboxPublisherEnabled: outboxPublisherEnabled === 'true',
+    dbLockTimeoutMs,
+    sqsConsumerEnabled: bool(env, 'SQS_CONSUMER_ENABLED'),
+    sqsDlqName: env.SQS_DLQ_NAME || 'wager-transactions-dlq.fifo',
+    sqsConsumerBatchSize: positiveInt(env, 'SQS_CONSUMER_BATCH_SIZE', 10, 10),
+    sqsConsumerWaitTimeSeconds: positiveInt(env, 'SQS_CONSUMER_WAIT_TIME_SECONDS', 20, 20),
+    sqsConsumerVisibilityTimeoutSeconds,
+    sqsConsumerMaxBackoffSeconds: positiveInt(env, 'SQS_CONSUMER_MAX_BACKOFF_SECONDS', 300),
+    outboxPublisherEnabled: bool(env, 'OUTBOX_PUBLISHER_ENABLED'),
     outboxPollIntervalMs: positiveInt(env, 'OUTBOX_POLL_INTERVAL_MS', 1000),
     outboxBatchSize: positiveInt(env, 'OUTBOX_BATCH_SIZE', 10),
     outboxPublishTimeoutMs: positiveInt(env, 'OUTBOX_PUBLISH_TIMEOUT_MS', 2000),
@@ -59,12 +86,21 @@ export function loadConfig(env: Env = process.env): Config {
   };
 }
 
-function positiveInt(env: Env, name: string, fallback: number): number {
+function positiveInt(env: Env, name: string, fallback: number, max = Number.MAX_SAFE_INTEGER): number {
   const value = Number(env[name] ?? fallback);
-  if (!Number.isInteger(value) || value < 1) {
-    throw new Error(`Configuração inválida: ${name}="${env[name]}" não é um inteiro positivo`);
+  if (!Number.isInteger(value) || value < 1 || value > max) {
+    throw new Error(`Configuração inválida: ${name}="${env[name]}" não é um inteiro positivo válido`);
   }
   return value;
+}
+
+/** Ausente ou vazio = ligado. */
+function bool(env: Env, name: string): boolean {
+  const value = env[name] || 'true';
+  if (value !== 'true' && value !== 'false') {
+    throw new Error(`Configuração inválida: ${name}="${value}" (use true | false)`);
+  }
+  return value === 'true';
 }
 
 function url(env: Env, name: string, fallback: string): string {

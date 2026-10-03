@@ -461,6 +461,54 @@ describe('persistência atômica', () => {
     await expect(attempt).rejects.toBeInstanceOf(UniqueViolationError);
     expect(await exists(data)).toEqual({ wallet: false, tx: false, entries: 0, outbox: false });
   });
+
+  // O consumidor SQS depende disto: a transação do use case roda dentro da que grava a inbox.
+  describe('run dentro de run participa da transação externa', () => {
+    const inboxMessage = () =>
+      InboxMessage.receive({ messageId: uuid(), consumerName: 'nested', payloadHash: 'h', receivedAt: now() });
+
+    test('externa falha depois de a interna concluir: nada da interna existe', async () => {
+      const data = opening();
+      const boom = new Error('boom');
+      const attempt = runner.run(async () => {
+        await runner.run(() => writeAll(data));
+        throw boom;
+      });
+      await expect(attempt).rejects.toBe(boom);
+      expect(await exists(data)).toEqual({ wallet: false, tx: false, entries: 0, outbox: false });
+    });
+
+    test('externa confirma: gravações das duas existem', async () => {
+      const data = opening();
+      const message = inboxMessage();
+      await runner.run(async () => {
+        await runner.run(() => writeAll(data));
+        await inbox.add(message);
+      });
+      expect(await exists(data)).toEqual({ wallet: true, tx: true, entries: 1, outbox: true });
+      expect(await inbox.find(message.consumerName, message.messageId)).toBeDefined();
+    });
+
+    test('interna falha por unicidade: só ela é desfeita e a externa relê e confirma', async () => {
+      const existing = await storedWallet();
+      const data = opening();
+      const message = inboxMessage();
+
+      await runner.run(async () => {
+        await inbox.add(message);
+        const inner = runner.run(async () => {
+          await writeAll(data);
+          await wallets.add(existing); // PK repetida
+        });
+        await expect(inner).rejects.toBeInstanceOf(UniqueViolationError);
+        // a transação externa continua utilizável (sem "current transaction is aborted")
+        expect(await runner.run(() => wallets.findById(existing.id))).toBeDefined();
+      });
+
+      expect(await exists(data)).toEqual({ wallet: false, tx: false, entries: 0, outbox: false });
+      expect(await inbox.find(message.consumerName, message.messageId)).toBeDefined();
+    });
+  });
 });
 
 describe('paginação estável do ledger', () => {

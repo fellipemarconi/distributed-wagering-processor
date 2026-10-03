@@ -6,12 +6,14 @@ import {
   Clock,
   EventPublisher,
   IdGenerator,
+  InboxRepository,
   LedgerRepository,
   OutboxRepository,
   TransactionRunner,
   WagerTransactionRepository,
   WalletRepository,
 } from './application/ports';
+import { ProcessWagerMessage } from './application/process-wager-message';
 import { ProcessWagerTransaction } from './application/process-wager-transaction';
 import { PublishOutboxBatch } from './application/publish-outbox-batch';
 import { CONFIG, type Config } from './config';
@@ -22,6 +24,7 @@ import { WalletsController } from './http/wallets.controller';
 import { PersistenceModule } from './infra/persistence/persistence.module';
 import { OutboxPublisherWorker } from './infra/outbox-publisher.worker';
 import { SqsEventPublisher } from './infra/sqs-event-publisher';
+import { SqsWagerConsumer } from './infra/sqs-wager-consumer';
 import { sqsProvider } from './infra/sqs.provider';
 import { ormOptions } from './mikro-orm.config';
 
@@ -45,6 +48,11 @@ const useCases: Provider[] = [
     provide: ProcessWagerTransaction,
     inject: USE_CASE_DEPS,
     useFactory: (...deps: ConstructorParameters<typeof ProcessWagerTransaction>) => new ProcessWagerTransaction(...deps),
+  },
+  {
+    provide: ProcessWagerMessage,
+    inject: [TransactionRunner, InboxRepository, ProcessWagerTransaction, Clock],
+    useFactory: (...deps: ConstructorParameters<typeof ProcessWagerMessage>) => new ProcessWagerMessage(...deps),
   },
   {
     provide: PublishOutboxBatch,
@@ -71,6 +79,7 @@ export class AppModule {
         { provide: APP_FILTER, useClass: ApiExceptionFilter },
         ...useCases,
         OutboxPublisherWorker,
+        SqsWagerConsumer,
       ],
     };
   }
