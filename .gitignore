@@ -1,0 +1,8 @@
+node_modules/
+.env
+.claude/
+CLAUDE.md
+CHALLENGE.md
+README.md
+openspec/
+AGENTS.md
