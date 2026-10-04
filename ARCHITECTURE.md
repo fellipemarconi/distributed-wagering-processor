@@ -217,6 +217,8 @@ Falha transitória e wallet inexistente não gravam nada — nem transação, ne
 
 No banco, a submissão grava a transação **já no estado decidido**, com um único `INSERT`: `PENDING` existe só em memória, entre `create()` e a decisão. O único `UPDATE` de estado é o do worker, que leva `PENDING_REFERENCE` a um estado terminal ou a reagenda.
 
+**`FAILED` nunca é produzido, por decisão.** Como a transação é gravada já no estado final e em um único commit, uma falha de infraestrutura desfaz tudo: não existe transação parcial para marcar como `FAILED`. O provedor recebe `503`, ou a mensagem volta para a fila, e o reenvio é seguro porque nada foi gravado. Gravar um `FAILED` exigiria uma segunda transação logo depois de uma falha de banco, e transformaria um erro transitório em estado terminal, impedindo o reenvio com a mesma chave. O estado e o código `INTERNAL_ERROR` continuam no domínio e no schema como ponto de extensão, para um erro permanente que venha a existir.
+
 Regras por tipo:
 
 | Kind | Valor | Move saldo | Referência | Lançamento |
@@ -708,8 +710,6 @@ O item 8 tem teste dedicado: um processo real recebe 232 operações em 4 wallet
 ### API e concorrência
 
 - Uma wallet muito quente pode gerar `503` quando a espera pelo lock passa de `DB_LOCK_TIMEOUT_MS`. O reenvio é seguro, mas não há retry dentro do servidor.
-- O estado `FAILED` (e o código `INTERNAL_ERROR`) existe no domínio e no schema, mas nenhum fluxo o produz hoje: erro de infraestrutura desfaz a transação e é reenviado, sem deixar registro.
-
 ### Consumidor da fila
 
 - **Sem extensão de visibilidade (heartbeat)**: uma mensagem que demore mais que a visibilidade é entregue a outra instância. Não duplica efeito (lock + inbox), só desperdiça um processamento.
