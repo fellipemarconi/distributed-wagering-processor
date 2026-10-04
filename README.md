@@ -63,6 +63,7 @@ export AWS_ENDPOINT_URL=http://localhost:4567
 | `bun run test:unit` | só os testes do domínio (`test/domain`); não precisa de Docker |
 | `bun run test:integration` | sobe o Compose, se preciso, e roda a suíte inteira |
 | `bun run test` | roda a suíte inteira com o Compose já de pé |
+| `bun run test:load` | sobe o Compose, se preciso, e roda o [teste de carga](#teste-de-carga) |
 | `bun run migration:up` | aplica as migrations pendentes |
 | `bun run migration:down` | reverte a última migration aplicada |
 | `bun run migration:create` | cria uma migration em branco em `src/migrations/` |
@@ -310,3 +311,24 @@ bun run typecheck
 Antes de rodar a suíte, encerre as instâncias da aplicação: elas consomem as mesmas filas que os testes usam. Se as dependências não estiverem acessíveis, a suíte falha logo no setup com uma mensagem indicando o que subir.
 
 Onde está cada teste obrigatório do enunciado: [Testes obrigatórios (§13)](./ARCHITECTURE.md#testes-obrigatórios-13).
+
+## Teste de carga
+
+```sh
+bun run test:load
+```
+
+Sobe 3 instâncias reais contra o Postgres e o LocalStack do Compose, aplica quatro cenários em taxa constante (`mixed`, `hot`, `replay`, `sqs`), verifica a correção nas wallets usadas e reescreve o bloco de resultados do [`LOAD_TEST.md`](./LOAD_TEST.md) — onde estão a metodologia, os números da execução de referência e a análise. Não faz parte do `test:integration`.
+
+Com os defaults leva cerca de 2 minutos. Sai com código diferente de zero se a verificação de correção falhar. Como na suíte, encerre antes as instâncias da aplicação; a carga fica gravada no banco `wagering_test`.
+
+| Variável | Default | Descrição |
+| --- | --- | --- |
+| `LOAD_SCENARIOS` | `mixed,hot,replay,sqs` | cenários a rodar, nesta ordem |
+| `LOAD_RATE` | `100` | requisições por segundo |
+| `LOAD_DURATION_S` | `20` | janela medida de cada cenário |
+| `LOAD_<CENÁRIO>_RATE`, `LOAD_<CENÁRIO>_DURATION_S` | — | sobrepõe por cenário, ex.: `LOAD_HOT_RATE=150` |
+| `LOAD_WARMUP_S` | `5` | aquecimento descartado, por cenário |
+| `LOAD_WALLETS` | `200` | wallets nos cenários `mixed`, `replay` e `sqs` |
+| `LOAD_REPLAY_FRACTION` | `0.3` | fração de replays no cenário `replay` |
+| `LOAD_TIMEOUT_MS` | `10000` | timeout de cada requisição no cliente |

@@ -8,6 +8,7 @@
     "test": "bun test",
     "test:unit": "SKIP_INFRA=1 bun test test/domain",
     "test:integration": "docker compose up -d --wait && bun test",
+    "test:load": "docker compose up -d --wait && bun test/load.ts",
     "migration:create": "bun --bun mikro-orm migration:create --blank",
     "migration:up": "bun --bun mikro-orm migration:up",
     "migration:down": "bun --bun mikro-orm migration:down"

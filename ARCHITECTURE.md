@@ -121,6 +121,8 @@ A unidade de concorrência é a wallet (§8). Toda operação que pode mudar um 
 - fila: a mensagem não é apagada e volta com backoff;
 - worker de pendentes: só aquela candidata é desfeita e continua vencida.
 
+O `lock_timeout` limita a espera **pelo lock**, não a espera total da requisição. No teste de carga, uma hot wallet acima da sua capacidade serial não gerou nenhum `503`: quem espera o lock são no máximo as conexões do pool (10 por instância, 26–29 de 30 observadas esperando), e cada uma espera bem menos que 5 s; o excedente fica na fila por conexão, e o cliente vê latência crescente e timeout. Medidas e ressalvas em [`LOAD_TEST.md`](./LOAD_TEST.md#por-que-não-apareceu-503--lock_timeout).
+
 ### Ordem de locks e ausência de deadlock
 
 | Caminho | Ordem |
@@ -695,12 +697,13 @@ A invariante final `wallet.balance == saldo reconstruído pelo ledger` é afirma
 
 O item 8 tem teste dedicado: um processo real recebe 232 operações em 4 wallets (por HTTP e pela fila, com reversões aceitas antes da referência), é morto com `SIGKILL` no meio da carga, e um segundo processo assume. O teste afirma que todas as operações terminaram `PROCESSED` uma única vez, o saldo exato de cada wallet, a invariante do ledger, um lançamento por transação, uma linha de inbox por mensagem, DLQ vazia, a reconciliação pela API e que todo evento confirmado foi publicado.
 
+**Teste de carga (diferencial do §14)** — `bun run test:load` (`test/load.ts`), fora da suíte: 3 processos reais sob taxa de chegada constante, com verificação de correção ao final de cada cenário. Metodologia, números e análise em [`LOAD_TEST.md`](./LOAD_TEST.md).
+
 ## Limitações conhecidas e o que faria com mais tempo
 
 ### Não implementado
 
 - **Autenticação** — só o ponto de extensão (ver [Autenticação](#autenticação)).
-- **Teste de carga** (`bun run test:load`) — diferencial opcional; não há números de throughput nem de latência.
 - **Aplicação no Compose** — o Compose sobe só Postgres e LocalStack. Várias instâncias são vários processos `bun run start` em portas diferentes; não há `Dockerfile`.
 - **Reprocessamento da DLQ** — é operação manual; o atributo `reason` permite reenviar seletivamente.
 - **Varredura agendada de reconciliação** — a reconciliação é sob demanda, por wallet.
@@ -710,6 +713,8 @@ O item 8 tem teste dedicado: um processo real recebe 232 operações em 4 wallet
 ### API e concorrência
 
 - Uma wallet muito quente pode gerar `503` quando a espera pelo lock passa de `DB_LOCK_TIMEOUT_MS`. O reenvio é seguro, mas não há retry dentro do servidor.
+- No teste de carga, a sobrecarga de uma wallet quente não chegou a virar `503`: as requisições esperam por conexão do pool, sem limite próprio de tempo nem rejeição antecipada (ver [`lock_timeout` e o `503`](#lock_timeout-e-o-503)). Falta um limite de espera por conexão ou de requisições em andamento por instância.
+
 ### Consumidor da fila
 
 - **Sem extensão de visibilidade (heartbeat)**: uma mensagem que demore mais que a visibilidade é entregue a outra instância. Não duplica efeito (lock + inbox), só desperdiça um processamento.
@@ -726,6 +731,7 @@ O item 8 tem teste dedicado: um processo real recebe 232 operações em 4 wallet
 - Não há limite de tentativas: um evento que o SQS sempre recusa fica em retry para sempre, com `warn` a cada falha.
 - Backoff sem jitter (`ponytail:` em `backoff.ts`): publishers podem sincronizar retries.
 - Uma conexão do pool fica segurada durante o envio do lote ao SQS.
+- O publisher divide o pool com as requisições: no teste de carga, com uma wallet saturada o publish lag médio passou de ~0,5 s para 9–29 s, para os eventos de todas as wallets (causa provável, não instrumentada: espera por conexão; ver [`LOAD_TEST.md`](./LOAD_TEST.md#outbox-lag)).
 
 ### Worker de `PENDING_REFERENCE`
 
@@ -748,7 +754,7 @@ O item 8 tem teste dedicado: um processo real recebe 232 operações em 4 wallet
 ### Com mais tempo, nesta ordem
 
 1. Autenticação com Keycloak no Compose, conforme o desenho acima.
-2. Aplicação no Compose (três réplicas) e teste de carga com throughput, p50/p95/p99, taxa de erro, conflitos de lock e outbox lag.
+2. Aplicação no Compose (três réplicas), pool de conexões separado para o publisher e limite de espera por conexão, repetindo o teste de carga em seguida.
 3. Heartbeat de visibilidade e pool deslizante no consumidor.
 4. Ferramenta de reprocessamento da DLQ por `reason`.
 5. Varredura agendada de reconciliação, com checkpoint por wallet.
