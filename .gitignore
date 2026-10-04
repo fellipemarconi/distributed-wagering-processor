@@ -3,7 +3,5 @@ node_modules/
 .claude/
 CLAUDE.md
 CHALLENGE.md
-ARCHITECTURE.md
-README.md
 openspec/
 AGENTS.md
