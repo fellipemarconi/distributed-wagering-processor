@@ -2,7 +2,7 @@
 
 Serviço financeiro distribuído que processa transações de apostas (`BET`, `WIN`, `LOSS`, `REFUND`, `ROLLBACK`) recebidas por HTTP e por SQS, com saldo e ledger consistentes sob concorrência, duplicidade e entrega fora de ordem.
 
-Este arquivo diz **como rodar e usar**. Decisões, trade-offs e limitações estão no [`ARCHITECTURE.md`](./ARCHITECTURE.md); o enunciado, no [`CHALLENGE.md`](./CHALLENGE.md).
+Este arquivo diz **como rodar e usar**. Decisões, trade-offs e limitações estão no [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 ## Pré-requisitos
 
